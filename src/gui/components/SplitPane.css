@@ -1,0 +1,104 @@
+.split-pane {
+  display: flex !important;
+  height: 100% !important;
+  width: 100% !important;
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.split-pane-horizontal {
+  flex-direction: row;
+}
+
+.split-pane-vertical {
+  flex-direction: column;
+}
+
+.split-pane-first,
+.split-pane-second {
+  overflow: hidden;
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.split-pane-vertical .split-pane-first,
+.split-pane-vertical .split-pane-second {
+  width: 100% !important;
+}
+
+.split-pane-gutter {
+  background: var(--border, #3c3c3c) !important;
+  position: relative !important;
+  z-index: 100 !important;
+  transition: background-color 0.1s;
+  flex-shrink: 0 !important;
+  flex-grow: 0 !important;
+  visibility: visible !important;
+  display: block !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  user-select: none !important;
+  box-sizing: border-box !important;
+}
+
+.split-pane-horizontal .split-pane-gutter {
+  width: 4px !important;
+  cursor: col-resize;
+  min-width: 4px !important;
+  max-width: 4px !important;
+  height: 100% !important;
+}
+
+.split-pane-vertical .split-pane-gutter {
+  height: 6px !important;
+  cursor: row-resize !important;
+  min-height: 6px !important;
+  max-height: 6px !important;
+  width: 100% !important;
+  min-width: 100% !important;
+  max-width: 100% !important;
+  background: var(--border, #3c3c3c) !important;
+  border-top: 1px solid var(--border, #3c3c3c) !important;
+  border-bottom: 1px solid var(--border, #3c3c3c) !important;
+  z-index: 100 !important;
+  left: 0 !important;
+  right: 0 !important;
+}
+
+.split-pane-gutter:hover {
+  background: var(--accent);
+}
+
+.split-pane-gutter-dragging {
+  background: var(--accent);
+}
+
+.split-pane-gutter::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: transparent;
+}
+
+.split-pane-horizontal .split-pane-gutter::after {
+  width: 8px;
+  left: -2px;
+  cursor: col-resize;
+}
+
+.split-pane-vertical .split-pane-gutter::after {
+  height: 12px;
+  top: -3px;
+  cursor: row-resize !important;
+  z-index: 101 !important;
+}
+

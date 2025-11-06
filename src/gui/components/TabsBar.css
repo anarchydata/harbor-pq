@@ -1,0 +1,104 @@
+.tabs-bar {
+  display: flex;
+  background: var(--vscode-editor-background, #1e1e1e);
+  border-bottom: 1px solid var(--vscode-tab-border, #3c3c3c);
+  height: 35px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+  min-height: 35px;
+}
+
+.tabs-container {
+  display: flex;
+  flex: 1;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: 0 var(--spacing-md);
+  height: 35px;
+  background: var(--vscode-tab-inactiveBackground);
+  color: var(--vscode-tab-inactiveForeground);
+  border-right: 1px solid var(--vscode-tab-border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  min-width: 80px;
+  max-width: 200px;
+  position: relative;
+}
+
+.tab:hover {
+  background: var(--vscode-tab-inactiveBackground);
+  color: var(--vscode-tab-activeForeground);
+}
+
+.tab-active {
+  background: var(--vscode-tab-activeBackground);
+  color: var(--vscode-tab-activeForeground);
+  border-bottom: 1px solid var(--vscode-tab-activeBackground);
+  margin-bottom: -1px;
+}
+
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.tab-dirty-indicator {
+  color: var(--vscode-editor-foreground);
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.tab-close-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s;
+  border-radius: 2px;
+  padding: 0;
+  font-size: 14px;
+}
+
+.tab:hover .tab-close-button {
+  opacity: 0.7;
+}
+
+.tab-close-button:hover {
+  opacity: 1 !important;
+  background: var(--vscode-list-hoverBackground);
+}
+
+.tabs-new-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 35px;
+  height: 35px;
+  border: none;
+  background: transparent;
+  color: var(--vscode-tab-inactiveForeground);
+  cursor: pointer;
+  transition: background-color 0.2s;
+  font-size: 18px;
+}
+
+.tabs-new-button:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+

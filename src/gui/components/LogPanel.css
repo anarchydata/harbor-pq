@@ -1,0 +1,153 @@
+.log-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background: var(--bg, #1e1e1e);
+  font-family: var(--font-family-editor, "Consolas", "Monaco", "Courier New", monospace);
+  border-left: 1px solid var(--border, #3e3e3e);
+}
+
+.log-panel-header {
+  padding: 8px 12px;
+  padding-right: 40px;
+  background: var(--panel, #252526);
+  border-bottom: 1px solid var(--border, #3e3e3e);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 36px;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.log-panel-title {
+  font-weight: 600;
+  color: var(--text, #cccccc);
+  font-size: 13px;
+}
+
+.log-panel-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.log-panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text, #cccccc);
+  cursor: pointer;
+}
+
+.log-panel-toggle input[type="checkbox"] {
+  cursor: pointer;
+}
+
+.log-panel-button {
+  background: transparent;
+  border: 1px solid var(--border, #3e3e3e);
+  color: var(--text, #cccccc);
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: background-color 0.2s;
+}
+
+.log-panel-button:hover {
+  background: var(--vscode-button-hoverBackground, #2a2d2e);
+}
+
+.log-panel-close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 46px;
+  height: 36px;
+  background: transparent;
+  border: none;
+  color: var(--text, #cccccc);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  transition: background-color 0.2s;
+  border-left: 1px solid var(--border, #3e3e3e);
+}
+
+.log-panel-close:hover {
+  background: var(--vscode-button-hoverBackground, #e81123);
+  color: white;
+}
+
+.log-panel-content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: auto;
+  padding: 4px;
+  font-size: 11px;
+}
+
+.log-panel-empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--muted, #858585);
+  font-style: italic;
+}
+
+.log-entry {
+  display: flex;
+  gap: 8px;
+  padding: 2px 4px;
+  line-height: 1.4;
+  word-break: break-all;
+  font-size: 11px;
+  transition: background-color 0.1s;
+}
+
+.log-entry:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.log-time {
+  color: var(--muted, #858585);
+  min-width: 80px;
+  flex-shrink: 0;
+}
+
+.log-level {
+  min-width: 60px;
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.log-message {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-entry-log .log-level {
+  color: var(--text, #cccccc);
+}
+
+.log-entry-info .log-level {
+  color: var(--accent, #4ec9b0);
+}
+
+.log-entry-warn .log-level {
+  color: var(--warning, #dcdcaa);
+}
+
+.log-entry-error .log-level {
+  color: var(--error, #f48771);
+}
+
+.log-entry-error .log-message {
+  color: var(--error, #f48771);
+}
+

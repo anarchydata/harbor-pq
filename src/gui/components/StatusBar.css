@@ -1,0 +1,83 @@
+.status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 22px;
+  min-height: 22px;
+  background: var(--vscode-statusBar-background, #007acc);
+  color: var(--vscode-statusBar-foreground, #ffffff);
+  font-size: 11px;
+  padding: 0 var(--spacing-sm, 8px);
+  border-top: 1px solid var(--border, #3c3c3c);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.status-bar-left,
+.status-bar-center,
+.status-bar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.status-bar-left {
+  flex: 1;
+}
+
+.status-bar-center {
+  flex: 0 0 auto;
+}
+
+.status-bar-right {
+  flex: 0 0 auto;
+}
+
+.status-bar-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: 0 var(--spacing-xs);
+  height: 22px;
+  cursor: default;
+}
+
+.status-bar-connection {
+  font-weight: 500;
+}
+
+.status-bar-connection-excel {
+  color: var(--success);
+}
+
+.status-bar-connection-local {
+  color: var(--vscode-infoForeground);
+}
+
+.status-bar-connection-unsaved {
+  color: var(--warning);
+}
+
+.status-bar-error {
+  color: var(--error);
+}
+
+.status-bar-initializing {
+  color: var(--vscode-progressBar-background, #0e639c);
+  font-weight: 500;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.status-bar-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+

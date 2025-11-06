@@ -1,0 +1,44 @@
+{
+  "name": "harbor-pq",
+  "version": "1.0.0",
+  "description": "Hybrid command router with GUI for workspace and code-level intents",
+  "main": "dist/main/electron.js",
+  "scripts": {
+    "build": "tsc && webpack --mode production",
+    "build:gui": "webpack --mode production",
+    "build:electron": "tsc && webpack --mode production",
+    "dev": "tsc --watch",
+    "dev:gui": "webpack --mode development --watch",
+    "start": "npx electron .",
+    "start:dev": "concurrently \"npm run dev:gui\" \"wait-on http://localhost:3000 && electron .\"",
+    "start:server": "node dist/server.js"
+  },
+  "keywords": [
+    "intent",
+    "router",
+    "parser",
+    "llm"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "electron": "^28.3.3",
+    "express": "^4.18.2",
+    "openai": "^4.20.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "css-loader": "^6.8.1",
+    "style-loader": "^3.3.3",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4"
+  }
+}
