@@ -190,6 +190,9 @@ in
   
   // Track which step is currently being executed (for caching)
   const executingStepIdRef = useRef<string | undefined>(undefined);
+  
+  // Track the M code that was executed (for caching after execution)
+  const executedMCodeRef = useRef<string>("");
 
   // Calculate which lines belong to a step (from step definition to last comma before next step)
   const getStepLines = useCallback((code: string, step: Step): number[] => {
@@ -462,6 +465,7 @@ in
     
     // Track which step we're executing (for caching)
     executingStepIdRef.current = step.id;
+    executedMCodeRef.current = reconstructedCode; // Store the code being executed for caching
     
     // Execute the reconstructed code directly - DON'T set executingMCode to avoid chat messages
     if (window.electronAPI) {
@@ -530,54 +534,7 @@ in
       console.log("[App] Data summary: rows=", data.rowCount, "cols=", data.columnCount, "engine=", data.engine, "elapsed=", data.elapsedMs, "ms");
       console.log("[App] Columns:", data.columns?.join(", ") || "none");
       
-      // Cache the result if we're executing a specific step (from step click)
-      const executingStepId = executingStepIdRef.current;
-      if (executingStepId) {
-        console.log(`[App] Caching result for step: ${executingStepId}`);
-        stepCacheRef.current.set(executingStepId, {
-          rows: data.rows || [],
-          columns: data.columns || [],
-          rowCount: data.rowCount || 0,
-          columnCount: data.columnCount || 0,
-        });
-        executingStepIdRef.current = undefined; // Clear after caching
-      } else {
-        // Full execution (not step-specific, e.g., from chat) - cache ALL steps up to the latest
-        const extractedSteps = extractSteps(mCode);
-        if (extractedSteps.length > 0) {
-          // Cache the latest step (the one that was just executed)
-          const latestStep = extractedSteps[extractedSteps.length - 1];
-          console.log(`[App] Caching result for latest step: ${latestStep.name}`);
-          stepCacheRef.current.set(latestStep.id, {
-            rows: data.rows || [],
-            columns: data.columns || [],
-            rowCount: data.rowCount || 0,
-            columnCount: data.columnCount || 0,
-          });
-          
-          // Also cache any new steps that were added (if this is a new step execution)
-          // This ensures all new steps get cached when they're added via chat/AI
-          const previousSteps = previousStepsRef.current;
-          if (extractedSteps.length > previousSteps.length) {
-            const newSteps = extractedSteps.slice(previousSteps.length);
-            // Cache all new steps with the same data (they all result in the same final output)
-            for (const newStep of newSteps) {
-              if (newStep.id !== latestStep.id) {
-                console.log(`[App] Caching result for new step: ${newStep.name}`);
-                stepCacheRef.current.set(newStep.id, {
-                  rows: data.rows || [],
-                  columns: data.columns || [],
-                  rowCount: data.rowCount || 0,
-                  columnCount: data.columnCount || 0,
-                });
-              }
-            }
-          }
-        }
-      }
-      
-      // Batch all state updates together for better performance
-      // React 18+ automatically batches these, but we can also use startTransition for non-urgent updates
+      // FIRST: Display the data (update preview immediately)
       startTransition(() => {
         setPreviewData(data.rows || []);
         setRowCount(data.rowCount || 0);
@@ -598,6 +555,61 @@ in
         setExecutingMCode(undefined); // Clear executing code when done
         setIsInitializing(false); // Mark initialization as complete after first successful data load
       });
+      
+      // THEN: Cache the result using the M code that was actually executed
+      // Use the executedMCodeRef which contains the code that produced this data
+      setTimeout(() => {
+        // Cache the result if we're executing a specific step (from step click)
+        const executingStepId = executingStepIdRef.current;
+        if (executingStepId) {
+          console.log(`[App] Caching result for step: ${executingStepId}`);
+          stepCacheRef.current.set(executingStepId, {
+            rows: data.rows || [],
+            columns: data.columns || [],
+            rowCount: data.rowCount || 0,
+            columnCount: data.columnCount || 0,
+          });
+          executingStepIdRef.current = undefined; // Clear after caching
+        } else {
+          // Full execution (not step-specific, e.g., from chat) - cache the latest step
+          // Use the executed M code (the code that produced this data)
+          const executedCode = executedMCodeRef.current || mCode;
+          const extractedSteps = extractSteps(executedCode);
+          if (extractedSteps.length > 0) {
+            // Cache the latest step (the one that was just executed)
+            const latestStep = extractedSteps[extractedSteps.length - 1];
+            console.log(`[App] Caching result for latest step: ${latestStep.name}`);
+            stepCacheRef.current.set(latestStep.id, {
+              rows: data.rows || [],
+              columns: data.columns || [],
+              rowCount: data.rowCount || 0,
+              columnCount: data.columnCount || 0,
+            });
+            
+            // Also cache any new steps that were added (if this is a new step execution)
+            // This ensures all new steps get cached when they're added via chat/AI
+            const previousSteps = previousStepsRef.current;
+            if (extractedSteps.length > previousSteps.length) {
+              const newSteps = extractedSteps.slice(previousSteps.length);
+              // Cache all new steps with the same data (they all result in the same final output)
+              for (const newStep of newSteps) {
+                if (newStep.id !== latestStep.id) {
+                  console.log(`[App] Caching result for new step: ${newStep.name}`);
+                  stepCacheRef.current.set(newStep.id, {
+                    rows: data.rows || [],
+                    columns: data.columns || [],
+                    rowCount: data.rowCount || 0,
+                    columnCount: data.columnCount || 0,
+                  });
+                }
+              }
+            }
+          }
+        }
+        // Clear the executed code ref after caching
+        executedMCodeRef.current = "";
+      }, 0); // Use 0ms timeout to run after current execution stack but before next render
+      
       // Don't change code window size after execution - keep user's preferred size
       console.log("[App] ✓ Preview data updated in UI");
     });
@@ -878,6 +890,7 @@ in
       console.log("[App] M code length:", code.length);
       setIsExecuting(true);
       setExecutingMCode(code); // Track the code being executed
+      executedMCodeRef.current = code; // Store the code that's being executed for caching
       window.electronAPI.setMCode(code).then(() => {
         console.log("[App] ✓ setMCode completed, calling runAll");
         window.electronAPI?.runAll(code).then((result: any) => {
@@ -886,11 +899,13 @@ in
           console.error("[App] ✗ Error in runAll:", error);
           setIsExecuting(false);
           setExecutingMCode(undefined);
+          executedMCodeRef.current = ""; // Clear on error
         });
       }).catch((error: any) => {
         console.error("[App] ✗ Error in setMCode:", error);
         setIsExecuting(false);
         setExecutingMCode(undefined);
+        executedMCodeRef.current = ""; // Clear on error
       });
     } else {
       console.warn("[App] electronAPI not available, marking as stale");
