@@ -70,3 +70,5 @@ The format is correct, but we're hitting a version mismatch:
 
 The MS-QDEFF spec describes the binary format used in Excel/Power BI files, but for execution via the SDK, we need the text format shown above. The SDK's `Utilities.CreateMashupConnectionInfo` parses this text format and converts it internally.
 
+
+

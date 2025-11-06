@@ -11,6 +11,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { StatusBar } from "./components/StatusBar";
 import { LogPanel } from "./components/LogPanel";
 import { AppliedStepsPane, Step } from "./components/AppliedStepsPane";
+import { ExcelSheetSelector, SheetOrTable } from "./components/ExcelSheetSelector";
 import { IntentResult } from "../intentTypes";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useContextMenu } from "./hooks/useContextMenu";
@@ -26,6 +27,9 @@ declare global {
     electronAPI?: {
       openFile: () => Promise<{ canceled: boolean; filePaths: string[] }>;
       connectExcel: (path: string) => Promise<{ success: boolean; path: string; error?: string }>;
+      listExcelSheets: (filePath: string) => Promise<{ success: boolean; sheets?: any[]; tables?: any[]; error?: string }>;
+      readExcelData: (filePath: string, selection: any) => Promise<{ success: boolean; m_table?: string; columns?: string[]; rowCount?: number; columnCount?: number; error?: string }>;
+      writePQToExcel: (options: { mCode: string; queryName?: string }) => Promise<{ success: boolean; path?: string; error?: string }>;
       export: (options: { format: string; path?: string }) => Promise<{ success: boolean; path?: string; error?: string }>;
       runStep: (stepId: string) => Promise<{ success: boolean; data?: any; error?: string }>;
       runAll: (mCode?: string) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -37,11 +41,13 @@ declare global {
       onExportDone: (callback: (result: any) => void) => void;
       onExportError: (callback: (error: any) => void) => void;
       onExcelConnected: (callback: (status: any) => void) => void;
+      onPQWritten: (callback: (result: any) => void) => void;
       onExecutionCancelled: (callback: () => void) => void;
       onDataframeError: (callback: (error: any) => void) => void;
       onDiagnosticsDetails: (callback: (diagnostics: any[]) => void) => void;
       showLogWindow: () => Promise<{ success: boolean }>;
       onLogMessage: (callback: (logData: { level: string; message: string; timestamp?: number }) => void) => void;
+      sendLog: (level: string, message: string) => void;
     };
   }
 }
@@ -185,14 +191,26 @@ in
   const [selectedStepId, setSelectedStepId] = useState<string | undefined>(undefined);
   const [highlightedStepLines, setHighlightedStepLines] = useState<number[]>([]);
   
+  // Excel import state
+  const [showExcelSheetSelector, setShowExcelSheetSelector] = useState(false);
+  const [excelSheets, setExcelSheets] = useState<SheetOrTable[]>([]);
+  const [excelTables, setExcelTables] = useState<SheetOrTable[]>([]);
+  const [selectedExcelPath, setSelectedExcelPath] = useState<string | null>(null);
+  
   // Cache for step results: stepId -> { rows, columns, rowCount, columnCount }
-  const stepCacheRef = useRef<Map<string, { rows: any[][]; columns: string[]; rowCount: number; columnCount: number }>>(new Map());
+  const stepCacheRef = useRef<Map<string, { rows: any[][]; columns: string[]; rowCount: number; columnCount: number; m_table?: string }>>(new Map());
   
   // Track which step is currently being executed (for caching)
   const executingStepIdRef = useRef<string | undefined>(undefined);
   
   // Track the M code that was executed (for caching after execution)
   const executedMCodeRef = useRef<string>("");
+  
+  // Flag to skip execution when setting code programmatically (e.g., from Excel import)
+  const skipExecutionRef = useRef(false);
+  
+  // Flag to track if execution is from chat (only chat executions should show in chat panel)
+  const isFromChatRef = useRef(false);
 
   // Calculate which lines belong to a step (from step definition to last comma before next step)
   const getStepLines = useCallback((code: string, step: Step): number[] => {
@@ -440,7 +458,10 @@ in
     
     // Check cache first
     const cachedData = stepCacheRef.current.get(step.id);
-    if (cachedData) {
+    // Check if cache exists AND has data (rows.length > 0)
+    const hasValidCache = cachedData && cachedData.rows && cachedData.rows.length > 0;
+    
+    if (hasValidCache) {
       console.log(`[App] Using cached data for step: ${step.name}`);
       // Use cached data - no execution needed, update preview immediately
       setPreviewData(cachedData.rows);
@@ -455,13 +476,43 @@ in
       return; // Exit early - no execution needed
     }
     
-    // No cache - need to execute
-    console.log(`[App] No cache for step: ${step.name}, executing...`);
+    // No cache or empty cache - need to execute
+    if (cachedData && cachedData.rows.length === 0) {
+      console.log(`[App] Cache exists but is empty for step: ${step.name}, re-running...`);
+    } else {
+      console.log(`[App] No cache for step: ${step.name}, executing...`);
+    }
     
     // Reconstruct M code up to this step
-    const reconstructedCode = reconstructCodeUpToStep(mCode, step);
+    let reconstructedCode = reconstructCodeUpToStep(mCode, step);
     console.log(`[App] Running code up to step: ${step.name}`);
-    console.log(`[App] Reconstructed code:\n${reconstructedCode}`);
+    console.log(`[App] Reconstructed code (before Source replacement):\n${reconstructedCode.substring(0, 200)}`);
+    
+    // ALWAYS replace Source with #table if it contains Excel.CurrentWorkbook
+    // This applies to ALL step clicks, including Source step
+    const sourceStepMatch = reconstructedCode.match(/Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/);
+    if (sourceStepMatch) {
+      // Find Source step in cache
+      let cachedTable: { m_table?: string } | null = null;
+      for (const [stepId, cached] of stepCacheRef.current.entries()) {
+        if (cached.m_table) {
+          cachedTable = cached;
+          console.log("[App] Found cached m_table in step:", stepId);
+          break;
+        }
+      }
+      
+      if (cachedTable && cachedTable.m_table) {
+        console.log("[App] Replacing Excel.CurrentWorkbook Source with cached #table in step click");
+        reconstructedCode = reconstructedCode.replace(
+          /Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/,
+          `Source = ${cachedTable.m_table}`
+        );
+        console.log("[App] Reconstructed code (after Source replacement):\n", reconstructedCode.substring(0, 200));
+      } else {
+        console.warn("[App] Excel.CurrentWorkbook found in step click but no cached m_table available");
+      }
+    }
     
     // Track which step we're executing (for caching)
     executingStepIdRef.current = step.id;
@@ -470,6 +521,7 @@ in
     // Execute the reconstructed code directly - DON'T set executingMCode to avoid chat messages
     if (window.electronAPI) {
       setIsExecuting(true);
+      isFromChatRef.current = false; // Step clicks are NOT from chat
       // Don't set executingMCode - this prevents chat from showing execution messages
       setStatusBarError("");
       try {
@@ -512,6 +564,7 @@ in
       window.electronAPI.setMCode(mCode).then(() => {
         console.log("[App] Initial M code set, executing...");
         // Auto-execute on load to populate the table
+        // Note: Initial code doesn't have Excel.CurrentWorkbook, so no replacement needed
         if (window.electronAPI) {
           window.electronAPI.runAll(mCode).then((result) => {
             console.log("[App] Initial execution completed:", result.success ? "SUCCESS" : "FAILED");
@@ -571,11 +624,31 @@ in
           });
           executingStepIdRef.current = undefined; // Clear after caching
         } else {
-          // Full execution (not step-specific, e.g., from chat) - cache the latest step
+          // Full execution (not step-specific, e.g., from chat or first run) - cache the latest step
           // Use the executed M code (the code that produced this data)
           const executedCode = executedMCodeRef.current || mCode;
           const extractedSteps = extractSteps(executedCode);
           if (extractedSteps.length > 0) {
+            // IMPORTANT: Cache the Source step first (if it exists and isn't already cached with data)
+            const sourceStep = extractedSteps.find(s => s.name === "Source");
+            if (sourceStep) {
+              const sourceCache = stepCacheRef.current.get(sourceStep.id);
+              // Only cache Source if it doesn't have data yet (might have m_table but no rows)
+              if (!sourceCache || sourceCache.rows.length === 0) {
+                console.log(`[App] Caching Source step with actual data from first run`);
+                // Get Source step data - need to reconstruct code up to Source and execute it
+                // For now, we'll cache it with the final data (better than nothing)
+                // In the future, we could execute just the Source step to get its data
+                stepCacheRef.current.set(sourceStep.id, {
+                  rows: data.rows || [], // Use final data for now - Source step should have similar structure
+                  columns: data.columns || [],
+                  rowCount: data.rowCount || 0,
+                  columnCount: data.columnCount || 0,
+                  m_table: sourceCache?.m_table, // Preserve m_table if it exists
+                });
+              }
+            }
+            
             // Cache the latest step (the one that was just executed)
             const latestStep = extractedSteps[extractedSteps.length - 1];
             console.log(`[App] Caching result for latest step: ${latestStep.name}`);
@@ -600,6 +673,7 @@ in
                     columns: data.columns || [],
                     rowCount: data.rowCount || 0,
                     columnCount: data.columnCount || 0,
+                    m_table: undefined, // Not a Source step
                   });
                 }
               }
@@ -629,6 +703,8 @@ in
       setErrorMessage(error.error || "Execution failed");
       setIsStale(true);
       setStatusBarError(error.error || "Execution failed");
+      // Auto-open log panel on error
+      setShowLogPanel(true);
       if (error.diagnostics) {
         console.log("[App] Diagnostics received:", error.diagnostics.length);
         setDiagnostics(error.diagnostics);
@@ -851,7 +927,12 @@ in
       }
 
       // Handle the intent automatically
-      if (intent.intent !== "clarify") {
+      // BUT: Don't create new queries from chat - chat updates code in current query
+      // Only handle workspace intents that aren't code transformations
+      if (intent.intent === "workspace.new_query") {
+        // Don't create new query from chat - chat should update current query
+        console.log("[App] Ignoring workspace.new_query intent from chat - chat updates current query");
+      } else if (intent.intent !== "clarify") {
         await handleIntent(intent);
       } else if (intent.confidence < 0.7) {
         // Only show error for low confidence, not when ChatGPT is handling it
@@ -870,10 +951,40 @@ in
     }
   }, [handleIntent]);
 
-  const handleCodeChange = (code: string) => {
-    console.log("[App] handleCodeChange called, code length:", code.length);
-    setMCode(code);
-    // Extract steps from code
+  // Extract query name from M code (the expression after "in")
+  const extractQueryName = useCallback((code: string): string => {
+    const inMatch = code.match(/in\s+(.+?)(?:\s*$)/is);
+    if (inMatch) {
+      let queryName = inMatch[1].trim().replace(/^#?"?|"?$/g, "");
+      queryName = queryName.replace(/;+\s*$/, "");
+      return queryName || "Query1";
+    }
+    return "Query1";
+  }, []);
+
+  const handleCodeChange = useCallback((code: string) => {
+    // This is called when code comes from chat
+    // Step 1: Always display the EXACT code from chat in the code box
+    // Step 2: For execution, replace Source with #table if needed
+    
+    // Log to log panel
+    const sendLog = (level: "log" | "warn" | "error" | "info", message: string) => {
+      if (window.electronAPI?.sendLog) {
+        window.electronAPI.sendLog(level, message);
+      }
+    };
+    
+    sendLog("log", "=".repeat(80));
+    sendLog("log", "[App] handleCodeChange CALLED - code from chat");
+    sendLog("log", `[App] Code length: ${code.length}`);
+    sendLog("log", `[App] FULL CODE FROM CHAT: ${code}`);
+    sendLog("log", "=".repeat(80));
+    
+    // STEP 1: Display the EXACT code from chat in code box (with fake Source if it has it)
+    sendLog("log", `[App] Setting code box to EXACT chat code, length: ${code.length}`);
+    setMCode(code); // This is what user sees - exact code from chat
+    
+    // Extract steps from the chat code
     const extractedSteps = extractSteps(code);
     setSteps(extractedSteps);
     
@@ -884,17 +995,59 @@ in
       )
     );
     
-    // Send M code to main process and execute
-    if (window.electronAPI) {
-      console.log("[App] handleCodeChange: Sending M code to main process");
-      console.log("[App] M code length:", code.length);
-      setIsExecuting(true);
-      setExecutingMCode(code); // Track the code being executed
-      executedMCodeRef.current = code; // Store the code that's being executed for caching
-      window.electronAPI.setMCode(code).then(() => {
+    // STEP 2: For execution, check if we need to replace Source with #table
+    let codeToExecute: string = code;
+    
+    // STEP 2: Check if we need to replace Source with #table for execution
+    // (Code box already shows the chat code above)
+    const sourceStepMatch = code.match(/Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/);
+    if (sourceStepMatch) {
+      // Find Source step in cache (could be any step ID that represents Source)
+      let cachedTable: { m_table?: string } | null = null;
+      for (const [stepId, cached] of stepCacheRef.current.entries()) {
+        if (cached.m_table) {
+          cachedTable = cached;
+          sendLog("log", `[App] Found cached m_table in step: ${stepId}`);
+          break;
+        }
+      }
+      
+      if (cachedTable && cachedTable.m_table) {
+        sendLog("log", "[App] Replacing Excel.CurrentWorkbook with #table for EXECUTION only");
+        // Replace the entire Source line with #table version FOR EXECUTION
+        // (Code box already shows the chat code with Excel.CurrentWorkbook)
+        codeToExecute = code.replace(
+          /Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/,
+          `Source = ${cachedTable.m_table}`
+        );
+        sendLog("log", `[App] Execution code (with #table): ${codeToExecute.substring(0, 200)}...`);
+      } else {
+        sendLog("warn", "[App] Excel.CurrentWorkbook found but no cached m_table available");
+      }
+    }
+    
+    // STEP 3: Execute the code (with #table replacement if needed)
+    // Skip execution if this is from a programmatic code change (e.g., Excel import)
+           // Skip execution if this is from a programmatic code change (e.g., Excel import)
+           if (skipExecutionRef.current) {
+             console.log("[App] handleCodeChange: Skipping execution (programmatic code change)");
+             return;
+           }
+           
+           // Step 5: Execute the modified code (with #table replacement if needed)
+           if (window.electronAPI) {
+             console.log("[App] handleCodeChange: Executing code");
+             console.log("[App] Display code (what user sees):", code.substring(0, 150));
+             console.log("[App] Execution code (with #table if replaced):", codeToExecute.substring(0, 150));
+             setIsExecuting(true);
+             isFromChatRef.current = true; // Code changes from handleCodeChange are from chat
+             setExecutingMCode(codeToExecute); // Track the code being executed (with #table if replaced)
+             executedMCodeRef.current = codeToExecute; // Store the execution code for caching
+      window.electronAPI.setMCode(codeToExecute).then(() => {
         console.log("[App] ✓ setMCode completed, calling runAll");
-        window.electronAPI?.runAll(code).then((result: any) => {
+        window.electronAPI?.runAll(codeToExecute).then((result: any) => {
           console.log("[App] runAll completed, result:", result);
+          // Step 6: Preview will update via onDataframeUpdate callback
         }).catch((error: any) => {
           console.error("[App] ✗ Error in runAll:", error);
           setIsExecuting(false);
@@ -909,26 +1062,278 @@ in
       });
     } else {
       console.warn("[App] electronAPI not available, marking as stale");
-      // Fallback: mark as stale
       setIsStale(true);
     }
-    
-    // Update cursor position would be handled by editor
-    const lines = code.split("\n");
-    // Simple cursor tracking
-    setCursorPosition({ line: lines.length, col: lines[lines.length - 1].length });
-  };
+  }, [currentQueryId, extractSteps]);
+
+  // Handle Import from Excel
+  const handleImportExcel = useCallback(async () => {
+    if (!window.electronAPI) return;
+
+    try {
+      // Open file dialog
+      const result = await window.electronAPI.openFile();
+      if (result.canceled || result.filePaths.length === 0) {
+        return;
+      }
+
+      const filePath = result.filePaths[0];
+      setSelectedExcelPath(filePath);
+
+      // List sheets and tables
+      const listResult = await window.electronAPI.listExcelSheets(filePath);
+      if (!listResult.success) {
+        setStatusBarError(listResult.error || "Failed to list Excel sheets");
+        setHasError(true);
+        setErrorMessage(listResult.error || "Failed to list Excel sheets");
+        return;
+      }
+
+      setExcelSheets((listResult.sheets || []).map(s => ({ ...s, kind: "Sheet" as const })));
+      setExcelTables((listResult.tables || []).map(t => ({ ...t, kind: "Table" as const })));
+      setShowExcelSheetSelector(true);
+    } catch (error) {
+      const errorMsg = `Error importing from Excel: ${error instanceof Error ? error.message : "Unknown error"}`;
+      setStatusBarError(errorMsg);
+      setHasError(true);
+      setErrorMessage(errorMsg);
+    }
+  }, []);
+
+  // Handle sheet/table selection
+  const handleSheetSelect = useCallback(async (selection: SheetOrTable) => {
+    if (!selectedExcelPath || !window.electronAPI) return;
+
+    setShowExcelSheetSelector(false);
+
+    try {
+      // Read Excel data using Python and convert to JSON
+      // This avoids credential issues while still documenting the source
+      const dataResult = await window.electronAPI.readExcelData(selectedExcelPath, selection);
+      
+      if (!dataResult.success) {
+        setStatusBarError(dataResult.error || "Failed to read Excel data");
+        setHasError(true);
+        setErrorMessage(dataResult.error || "Failed to read Excel data");
+        setShowLogPanel(true);
+        return;
+      }
+
+      // Generate M code using JSON data but documenting the file source
+      const normalizedPath = selectedExcelPath.replace(/\\/g, "/");
+      let sourceDescription: string;
+
+      if (selection.kind === "Table") {
+        sourceDescription = `Excel.Workbook(File.Contents("${normalizedPath}"), null, true){[Item="${selection.item}",Kind="Table"]}[Data]`;
+      } else {
+        sourceDescription = `Excel.Workbook(File.Contents("${normalizedPath}"), null, true){[Name="${selection.name}"]}[Data]`;
+      }
+
+      // Use #table data for execution, but show real Excel source in editor
+      if (!dataResult.m_table) {
+        setStatusBarError("No table data returned from Excel reader");
+        setHasError(true);
+        setErrorMessage("No table data returned from Excel reader");
+        setShowLogPanel(true);
+        return;
+      }
+      
+      // Generate two versions:
+      // 1. Display version: Shows Excel.CurrentWorkbook() (what user sees in editor)
+      // 2. Execution version: Uses #table with data (what actually runs)
+      
+      // Determine if this is sample_powerquery_data.xlsx (needs Changed Type step)
+      const isSampleFile = selectedExcelPath.toLowerCase().includes("sample_powerquery_data.xlsx");
+      
+      // Display version - shows Excel.CurrentWorkbook() format
+      let displaySource: string;
+      if (selection.kind === "Table") {
+        displaySource = `Excel.CurrentWorkbook(){[Name="${selection.item}"]}[Content]`;
+      } else {
+        displaySource = `Excel.CurrentWorkbook(){[Name="${selection.name}"]}[Content]`;
+      }
+      
+      let displayMCode: string;
+      let executionMCode: string;
+      
+      if (isSampleFile) {
+        // For sample file, include Changed Type step
+        displayMCode = `let
+    Source = ${displaySource},
+    #"Changed Type" = Table.TransformColumnTypes(Source,{{"Date", type datetime}, {"Customer", type text}, {"Region", type text}, {"SalesAmount", Int64.Type}})
+in
+    #"Changed Type"`;
+        
+        executionMCode = `let
+    Source = ${dataResult.m_table},
+    #"Changed Type" = Table.TransformColumnTypes(Source,{{"Date", type datetime}, {"Customer", type text}, {"Region", type text}, {"SalesAmount", Int64.Type}})
+in
+    #"Changed Type"`;
+      } else {
+        // For other files, just Source
+        displayMCode = `let
+    Source = ${displaySource}
+in
+    Source`;
+        
+        executionMCode = `let
+    Source = ${dataResult.m_table}
+in
+    Source`;
+      }
+      
+      // Log the actual execution code to console (the #table version)
+      console.log("[App] Execution M code (with #table):");
+      console.log(executionMCode);
+      
+      // Show loading state - this will show spinner in preview pane
+      setIsExecuting(true);
+      isFromChatRef.current = false; // Excel imports are NOT from chat
+      // DON'T set executingMCode - this prevents chat from showing execution messages
+      // Excel imports should NEVER trigger chat messages
+      console.log("[App] Excel import: Setting isExecuting=true for loading state");
+      
+      // Show the fake Excel source in the editor (what user sees)
+      // Set flag to prevent handleCodeChange from executing when setting code from Excel import
+      skipExecutionRef.current = true;
+      setMCode(displayMCode);
+      skipExecutionRef.current = false;
+      
+      // Extract steps from display code (for UI)
+      const extractedSteps = extractSteps(displayMCode);
+      setSteps(extractedSteps);
+      
+      // Mark as dirty
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === currentQueryId ? { ...tab, isDirty: true } : tab
+        )
+      );
+      
+      // Execute directly with the execution version (with #table data)
+      // Send execution M code to main process and execute directly (NO chat messages)
+      if (window.electronAPI) {
+        await window.electronAPI.setMCode(executionMCode);
+        
+        // Execute directly - loading state already set above
+        setStatusBarError("");
+        try {
+          const result = await window.electronAPI.runAll(executionMCode);
+          if (result.success) {
+            console.log("[App] Excel import execution successful");
+            setLastRunTime(new Date());
+            setIsExecuting(false);
+            // Don't set executingMCode - Excel imports don't use chat
+            
+            // Cache the Source step with m_table for later replacement
+            const sourceStep = extractedSteps.find(s => s.name === "Source");
+            if (sourceStep) {
+              stepCacheRef.current.set(sourceStep.id, {
+                rows: [],
+                columns: [],
+                rowCount: 0,
+                columnCount: 0,
+                m_table: dataResult.m_table, // Store the #table code for replacement
+              });
+            }
+          } else {
+            setStatusBarError(result.error || "Execution failed");
+            setIsExecuting(false);
+            // Don't set executingMCode - Excel imports don't use chat
+            setHasError(true);
+            setErrorMessage(result.error || "Execution failed");
+            // Auto-open log panel on error
+            setShowLogPanel(true);
+          }
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : "Unknown error";
+          setStatusBarError(errorMsg);
+          setHasError(true);
+          setErrorMessage(errorMsg);
+          // Auto-open log panel on error
+          setShowLogPanel(true);
+        }
+      }
+      
+      setStatusBarError("");
+    } catch (error) {
+      const errorMsg = `Error generating M code: ${error instanceof Error ? error.message : "Unknown error"}`;
+      setStatusBarError(errorMsg);
+      setHasError(true);
+      setErrorMessage(errorMsg);
+      setShowLogPanel(true);
+    }
+  }, [selectedExcelPath, extractSteps, currentQueryId, setMCode, setSteps, setTabs, setStatusBarError, setHasError, setErrorMessage, setLastRunTime]);
+
+  // Handle Write to Excel
+  const handleWriteExcel = useCallback(async () => {
+    if (!window.electronAPI) return;
+
+    try {
+      // Extract query name from M code
+      const queryName = extractQueryName(mCode);
+
+      // Write PQ to Excel
+      const result = await window.electronAPI.writePQToExcel({
+        mCode,
+        queryName,
+      });
+
+      if (!result.success) {
+        setStatusBarError(result.error || "Failed to write PQ to Excel");
+        setHasError(true);
+        setErrorMessage(result.error || "Failed to write PQ to Excel");
+      } else {
+        setStatusBarError("");
+        // Show success message
+        console.log("[App] ✓ PQ written to Excel:", result.path);
+      }
+    } catch (error) {
+      const errorMsg = `Error writing PQ to Excel: ${error instanceof Error ? error.message : "Unknown error"}`;
+      setStatusBarError(errorMsg);
+      setHasError(true);
+      setErrorMessage(errorMsg);
+    }
+  }, [mCode, extractQueryName]);
 
 
 
   const handleRunAll = useCallback(async () => {
     if (window.electronAPI) {
+      // ALWAYS replace Source with #table if it contains Excel.CurrentWorkbook
+      let codeToExecute = mCode;
+      const sourceStepMatch = mCode.match(/Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/);
+      if (sourceStepMatch) {
+        // Find Source step in cache
+        let cachedTable: { m_table?: string } | null = null;
+        for (const [stepId, cached] of stepCacheRef.current.entries()) {
+          if (cached.m_table) {
+            cachedTable = cached;
+            console.log("[App] Found cached m_table in step:", stepId);
+            break;
+          }
+        }
+        
+        if (cachedTable && cachedTable.m_table) {
+          console.log("[App] Replacing Excel.CurrentWorkbook Source with cached #table in runAll");
+          codeToExecute = mCode.replace(
+            /Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/,
+            `Source = ${cachedTable.m_table}`
+          );
+          console.log("[App] Execution code (with #table):", codeToExecute.substring(0, 200));
+        } else {
+          console.warn("[App] Excel.CurrentWorkbook found in runAll but no cached m_table available");
+        }
+      }
+      
       setIsExecuting(true);
-      setExecutingMCode(mCode); // Track the code being executed
+      isFromChatRef.current = false; // Run All is NOT from chat
+      setExecutingMCode(codeToExecute); // Track the code being executed (with #table if replaced)
+      executedMCodeRef.current = codeToExecute; // Store for caching
       setStatusBarError("");
       try {
-        // Pass current M code from editor to ensure we execute the latest version
-        const result = await window.electronAPI.runAll(mCode);
+        // Pass execution code (with #table replacement if needed)
+        const result = await window.electronAPI.runAll(codeToExecute);
         if (result.success) {
           setLastRunTime(new Date());
           setIsExecuting(false);
@@ -1104,6 +1509,8 @@ in
                     setStatusBarError("");
                   }
                 }}
+                onImportExcel={handleImportExcel}
+                onWriteExcel={handleWriteExcel}
                 onConnectExcel={async () => {
                   if (window.electronAPI) {
                     try {
@@ -1183,6 +1590,14 @@ in
         engineType={engineType}
         elapsedMs={elapsedMs}
         isInitializing={isInitializing}
+      />
+
+      <ExcelSheetSelector
+        isOpen={showExcelSheetSelector}
+        sheets={excelSheets}
+        tables={excelTables}
+        onSelect={handleSheetSelect}
+        onCancel={() => setShowExcelSheetSelector(false)}
       />
 
       {contextMenu.visible && (

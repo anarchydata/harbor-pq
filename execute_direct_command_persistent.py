@@ -70,24 +70,34 @@ for line in sys.stdin:
             print(json.dumps(result), flush=True)
         except Exception as e:
             import traceback
+            import sys
+            error_msg = str(e) + "\n" + traceback.format_exc()
+            # Log error to stderr so it appears in log panel
+            print(f"ERROR: {error_msg}", file=sys.stderr, flush=True)
             error_result = {
                 "id": request_id,
                 "success": False,
-                "error": str(e) + "\n" + traceback.format_exc()
+                "error": error_msg
             }
             print(json.dumps(error_result), flush=True)
     except json.JSONDecodeError as e:
+        import sys
+        error_msg = f"Invalid JSON: {e}"
+        print(f"ERROR: {error_msg}", file=sys.stderr, flush=True)
         error_result = {
             "id": None,
             "success": False,
-            "error": f"Invalid JSON: {e}"
+            "error": error_msg
         }
         print(json.dumps(error_result), flush=True)
     except Exception as e:
         import traceback
+        import sys
+        error_msg = str(e) + "\n" + traceback.format_exc()
+        print(f"ERROR: {error_msg}", file=sys.stderr, flush=True)
         error_result = {
             "id": None,
             "success": False,
-            "error": str(e) + "\n" + traceback.format_exc()
+            "error": error_msg
         }
         print(json.dumps(error_result), flush=True)

@@ -23,7 +23,7 @@ interface ChatPanelProps {
   intentResult?: IntentResult | null;
   currentCode?: string;
   isExecuting?: boolean;
-  executingMCode?: string;
+  executingMCode?: string; // Still receive it but don't use it for display
 }
 
 export function ChatPanel({ onSendMessage, onCodeUpdate, intentResult, currentCode = "", isExecuting = false, executingMCode }: ChatPanelProps) {
@@ -44,15 +44,19 @@ export function ChatPanel({ onSendMessage, onCodeUpdate, intentResult, currentCo
   }, [messages]);
 
   // Handle execution status changes
+  // Only show execution messages in chat if execution is from chat (not from step clicks or Excel imports)
   useEffect(() => {
+    // Check if this execution is from chat - we'll use a prop for this
+    // For now, only show chat messages if executingMCode is set (which only happens from chat)
     if (isExecuting && executingMCode) {
       // Add or update execution message
+      // Use currentCode (same as editor) instead of executingMCode for display
       const executionMessage: Message = {
         id: executionMessageIdRef.current || Date.now().toString(),
         role: "assistant",
         content: "Running...",
         timestamp: new Date(),
-        mCode: executingMCode,
+        mCode: currentCode, // Use currentCode (same as editor) so chat and editor match
         status: "running",
         actionDescription: "Executing M code...",
       };
@@ -85,7 +89,7 @@ export function ChatPanel({ onSendMessage, onCodeUpdate, intentResult, currentCo
         executionMessageIdRef.current = null;
       }, 2000);
     }
-  }, [isExecuting, executingMCode]);
+  }, [isExecuting, executingMCode, currentCode]);
 
   const handleSend = async () => {
     if (!input.trim() || isComposing || isLoading) return;
@@ -169,8 +173,7 @@ export function ChatPanel({ onSendMessage, onCodeUpdate, intentResult, currentCo
 
       // Update code if we got a code response
       if (data.code) {
-        console.log("[ChatPanel] Code received, length:", data.code.length);
-        console.log("[ChatPanel] Calling onCodeUpdate");
+        console.log("[ChatPanel] Code received from OpenAI, length:", data.code.length);
         
         // Add assistant message describing what was done
         const actionDesc = messageText.toLowerCase().includes("remove") 
@@ -188,7 +191,39 @@ export function ChatPanel({ onSendMessage, onCodeUpdate, intentResult, currentCo
         };
         setMessages((prev) => [...prev, assistantMessage]);
         
-        // Update code (this will trigger execution)
+        // Step 4: Replace Source with #table (if needed) before passing to onCodeUpdate
+        // onCodeUpdate will handle the replacement and execution
+        const sendLog = (level: "log" | "warn" | "error" | "info", message: string) => {
+          if (window.electronAPI?.sendLog) {
+            window.electronAPI.sendLog(level, message);
+          }
+        };
+        
+        sendLog("log", "=".repeat(80));
+        sendLog("log", "[ChatPanel] CODE RECEIVED FROM OPENAI");
+        sendLog("log", `[ChatPanel] Code length: ${data.code.length}`);
+        sendLog("log", `[ChatPanel] Code first 200 chars: ${data.code.substring(0, 200)}`);
+        sendLog("log", `[ChatPanel] Code last 200 chars: ${data.code.substring(Math.max(0, data.code.length - 200))}`);
+        sendLog("log", `[ChatPanel] FULL CODE FROM OPENAI: ${data.code}`);
+        sendLog("log", "=".repeat(80));
+        
+        // Check if code is complete
+        const hasIn = /\bin\s+/.test(data.code);
+        if (!hasIn) {
+          sendLog("error", "=".repeat(80));
+          sendLog("error", "[ChatPanel] ERROR: Code from OpenAI is MISSING 'in' statement!");
+          sendLog("error", `[ChatPanel] Code length: ${data.code.length}`);
+          sendLog("error", `[ChatPanel] Last 200 chars: ${data.code.substring(Math.max(0, data.code.length - 200))}`);
+          sendLog("error", `[ChatPanel] FULL CODE: ${data.code}`);
+          sendLog("error", "=".repeat(80));
+        } else {
+          const inMatch = data.code.match(/\bin\s+([^\s]+)/);
+          sendLog("log", `[ChatPanel] ✓ Code has "in" statement, final step: ${inMatch ? inMatch[1] : "unknown"}`);
+        }
+        
+        // Send EXACT code from OpenAI - no modifications
+        sendLog("log", `[ChatPanel] Sending code to onCodeUpdate - EXACT from OpenAI, length: ${data.code.length}`);
+        sendLog("log", `[ChatPanel] Full code being sent: ${data.code}`);
         onCodeUpdate?.(data.code);
       } else if (data.message) {
         // Clarification message from ChatGPT (no code to execute)

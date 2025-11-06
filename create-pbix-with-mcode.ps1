@@ -137,3 +137,5 @@ Write-Host "  2. Try to execute with container executable" -ForegroundColor Yell
 Write-Host "  3. Or use Power BI Desktop to open and test" -ForegroundColor Yellow
 Write-Host "`nTemp directory: $tempDir" -ForegroundColor Gray
 
+
+

@@ -752,6 +752,15 @@ ipcMain.on("close-log-window", () => {
   }
 });
 
+// Handle logs from renderer process
+ipcMain.on("renderer:log", (event, logData: { level: string; message: string; timestamp?: number }) => {
+  // Use the existing sendLogToRenderer function - but bypass isLogging check
+  const originalIsLogging = isLogging;
+  isLogging = false; // Temporarily disable the check
+  sendLogToRenderer(logData.level as "log" | "warn" | "error" | "info", logData.message);
+  isLogging = originalIsLogging; // Restore original value
+});
+
 ipcMain.handle("cancel-execution", async () => {
   if (currentRunner) {
     currentRunner.cancel();
@@ -760,6 +769,307 @@ ipcMain.handle("cancel-execution", async () => {
     return { success: true };
   }
   return { success: false, error: "No execution in progress" };
+});
+
+// IPC handler to list Excel sheets and tables
+ipcMain.handle("list-excel-sheets", async (event, filePath: string) => {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const { spawn } = require("child_process");
+    const { promisify } = require("util");
+    
+    // Validate file exists
+    if (!fs.existsSync(filePath)) {
+      return { success: false, error: "File not found" };
+    }
+
+    // Validate it's an Excel file
+    if (!filePath.toLowerCase().endsWith(".xlsx") && !filePath.toLowerCase().endsWith(".xls")) {
+      return { success: false, error: "File must be an Excel file (.xlsx or .xls)" };
+    }
+
+    // Use Python to read Excel file structure (no Power Query needed)
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    // Use project root instead of dist folder - Python files aren't compiled
+    const projectRoot = path.resolve(__dirname, "..", "..");
+    const scriptPath = path.join(projectRoot, "src", "main", "excelReader.py");
+    
+    console.log("[IPC] Reading Excel structure with Python:", filePath);
+    console.log("[IPC] Python script path:", scriptPath);
+    
+    return new Promise((resolve, reject) => {
+      const pythonProcess = spawn(pythonCmd, [scriptPath, filePath], {
+        cwd: path.dirname(scriptPath),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let stdout = "";
+      let stderr = "";
+
+      pythonProcess.stdout.on("data", (data: Buffer) => {
+        stdout += data.toString();
+      });
+
+      pythonProcess.stderr.on("data", (data: Buffer) => {
+        const stderrText = data.toString();
+        stderr += stderrText;
+        // Log debug output to console
+        console.log("[ExcelReader DEBUG]", stderrText.trim());
+      });
+
+      pythonProcess.on("close", (code: number) => {
+        // Log all stderr output for debugging
+        if (stderr) {
+          console.log("[ExcelReader] Full stderr output:", stderr);
+        }
+        
+        if (code !== 0) {
+          console.error("[IPC] Python script error:", stderr);
+          resolve({ success: false, error: stderr || "Failed to read Excel file" });
+          return;
+        }
+
+        try {
+          const result = JSON.parse(stdout);
+          if (result.success) {
+            console.log("[IPC] Found", result.sheets?.length || 0, "sheets and", result.tables?.length || 0, "tables");
+            resolve(result);
+          } else {
+            resolve({ success: false, error: result.error || "Failed to read Excel file" });
+          }
+        } catch (parseError) {
+          console.error("[IPC] Failed to parse Python output:", stdout);
+          resolve({ success: false, error: "Failed to parse Excel file structure" });
+        }
+      });
+
+      pythonProcess.on("error", (error: Error) => {
+        console.error("[IPC] Python process error:", error);
+        resolve({ success: false, error: `Failed to run Python: ${error.message}` });
+      });
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error("[IPC] Error listing Excel sheets:", errorMessage);
+    return { success: false, error: errorMessage };
+  }
+});
+
+// IPC handler to read Excel data and return M table code
+ipcMain.handle("read-excel-data", async (event, filePath: string, selection: any) => {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const { spawn } = require("child_process");
+    
+    // Validate file exists
+    if (!fs.existsSync(filePath)) {
+      return { success: false, error: "File not found" };
+    }
+
+    // Use Python to read Excel data and convert to M table format
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    const projectRoot = path.resolve(__dirname, "..", "..");
+    const scriptPath = path.join(projectRoot, "src", "main", "excelReader.py");
+    
+    console.log("[IPC] Reading Excel data with Python:", filePath);
+    console.log("[IPC] Selection:", JSON.stringify(selection));
+    
+    return new Promise((resolve, reject) => {
+      const pythonProcess = spawn(pythonCmd, [scriptPath, filePath, "read_data", JSON.stringify(selection)], {
+        cwd: path.dirname(scriptPath),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let stdout = "";
+      let stderr = "";
+
+      pythonProcess.stdout.on("data", (data: Buffer) => {
+        stdout += data.toString();
+      });
+
+      pythonProcess.stderr.on("data", (data: Buffer) => {
+        const stderrText = data.toString();
+        stderr += stderrText;
+        console.log("[ExcelReader DEBUG]", stderrText.trim());
+      });
+
+      pythonProcess.on("close", (code: number) => {
+        if (code !== 0) {
+          console.error("[IPC] Python script error:", stderr);
+          resolve({ success: false, error: stderr || "Failed to read Excel data" });
+          return;
+        }
+
+        try {
+          const result = JSON.parse(stdout);
+          if (result.success) {
+            console.log("[IPC] Excel data read successfully, rows:", result.rowCount);
+            resolve(result);
+          } else {
+            resolve({ success: false, error: result.error || "Failed to read Excel data" });
+          }
+        } catch (parseError) {
+          console.error("[IPC] Failed to parse Python output:", stdout);
+          resolve({ success: false, error: "Failed to parse Excel data" });
+        }
+      });
+
+      pythonProcess.on("error", (error: Error) => {
+        console.error("[IPC] Python process error:", error);
+        resolve({ success: false, error: `Failed to run Python: ${error.message}` });
+      });
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error("[IPC] Error reading Excel data:", errorMessage);
+    return { success: false, error: errorMessage };
+  }
+});
+
+// IPC handler to write Power Query to Excel file
+ipcMain.handle("write-pq-to-excel", async (event, options: { mCode: string; queryName?: string }) => {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const { dialog } = require("electron");
+    const { writePQToExcel } = require("./excelWriter");
+
+    // Always show save dialog to save as a new file
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      defaultPath: "query.xlsx",
+      filters: [
+        { name: "Excel Files", extensions: ["xlsx"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
+
+    if (result.canceled) {
+      return { success: false, error: "Save canceled" };
+    }
+
+    const excelPath = result.filePath;
+    if (!excelPath) {
+      return { success: false, error: "No file path selected" };
+    }
+
+    // Ensure .xlsx extension
+    let finalPath = excelPath;
+    if (!finalPath.toLowerCase().endsWith(".xlsx")) {
+      finalPath = finalPath + ".xlsx";
+    }
+
+    // Always create a new file (remove if exists to ensure clean state)
+    if (fs.existsSync(finalPath)) {
+      fs.unlinkSync(finalPath);
+    }
+
+    // Create a minimal Excel file structure
+    {
+      const AdmZip = require("adm-zip");
+      const zip = new AdmZip();
+      
+      // Create minimal [Content_Types].xml
+      const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
+  <Default Extension="xml" ContentType="application/xml" />
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" />
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml" />
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml" />
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml" />
+</Types>`;
+      zip.addFile("[Content_Types].xml", Buffer.from(contentTypes, "utf-8"));
+
+      // Create minimal _rels/.rels
+      const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml" />
+</Relationships>`;
+      zip.addFile("_rels/.rels", Buffer.from(rels, "utf-8"));
+
+      // Create minimal xl/workbook.xml
+      const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1" />
+  </sheets>
+</workbook>`;
+      zip.addFile("xl/workbook.xml", Buffer.from(workbook, "utf-8"));
+
+      // Create minimal xl/_rels/workbook.xml.rels
+      const workbookRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml" />
+</Relationships>`;
+      zip.addFile("xl/_rels/workbook.xml.rels", Buffer.from(workbookRels, "utf-8"));
+
+      // Create minimal xl/worksheets/sheet1.xml
+      const sheet1 = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData />
+</worksheet>`;
+      zip.addFile("xl/worksheets/sheet1.xml", Buffer.from(sheet1, "utf-8"));
+
+      // Create minimal xl/styles.xml
+      const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1">
+    <font />
+  </fonts>
+  <fills count="1">
+    <fill />
+  </fills>
+  <borders count="1">
+    <border />
+  </borders>
+  <cellStyleXfs count="1">
+    <xf />
+  </cellStyleXfs>
+  <cellXfs count="1">
+    <xf />
+  </cellXfs>
+</styleSheet>`;
+      zip.addFile("xl/styles.xml", Buffer.from(styles, "utf-8"));
+
+      // Create minimal xl/sharedStrings.xml
+      const sharedStrings = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="0" uniqueCount="0" />`;
+      zip.addFile("xl/sharedStrings.xml", Buffer.from(sharedStrings, "utf-8"));
+
+      zip.writeZip(finalPath);
+    }
+
+    console.log("[IPC] Writing PQ to Excel:", finalPath);
+    console.log("[IPC] M Code length:", options.mCode.length);
+    
+    // Write Power Query to Excel
+    await writePQToExcel(finalPath, options.mCode, options.queryName || "Query1");
+    
+    // Verify file was created
+    if (!fs.existsSync(finalPath)) {
+      throw new Error("File was not created successfully");
+    }
+    
+    console.log("[IPC] ✓ Excel file saved successfully:", finalPath);
+    
+    // Emit success event
+    mainWindow?.webContents.send("pq:written", {
+      path: finalPath,
+      success: true,
+    });
+
+    return { success: true, path: finalPath };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error("[IPC] Error writing PQ to Excel:", errorMessage);
+    mainWindow?.webContents.send("pq:written", {
+      success: false,
+      error: errorMessage,
+    });
+    return { success: false, error: errorMessage };
+  }
 });
 
 ipcMain.handle("run-all", async (event, providedMCode?: string) => {
@@ -832,11 +1142,11 @@ ipcMain.handle("run-all", async (event, providedMCode?: string) => {
     console.error("[IPC] Error executing M code:", error);
     console.error("[IPC] Error stack:", error instanceof Error ? error.stack : "No stack trace");
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    mainWindow?.webContents.send("dataframe:error", {
-      error: errorMessage,
-      diagnostics: [],
-    });
-    return { success: false, error: errorMessage };
+      mainWindow?.webContents.send("dataframe:error", {
+        error: errorMessage,
+        diagnostics: [],
+      });
+      return { success: false, error: errorMessage };
   }
 });
 

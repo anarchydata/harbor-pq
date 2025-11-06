@@ -149,25 +149,35 @@ for line in sys.stdin:
             print(json.dumps(result), flush=True)
         except Exception as e:
             import traceback
+            import sys
+            error_msg = str(e) + "\\n" + traceback.format_exc()
+            # Log error to stderr so it appears in log panel
+            print(f"ERROR: {error_msg}", file=sys.stderr, flush=True)
             error_result = {
                 "id": request_id,
                 "success": False,
-                "error": str(e) + "\\n" + traceback.format_exc()
+                "error": error_msg
             }
             print(json.dumps(error_result), flush=True)
     except json.JSONDecodeError as e:
+        import sys
+        error_msg = f"Invalid JSON: {e}"
+        print(f"ERROR: {error_msg}", file=sys.stderr, flush=True)
         error_result = {
             "id": None,
             "success": False,
-            "error": f"Invalid JSON: {e}"
+            "error": error_msg
         }
         print(json.dumps(error_result), flush=True)
     except Exception as e:
         import traceback
+        import sys
+        error_msg = str(e) + "\\n" + traceback.format_exc()
+        print(f"ERROR: {error_msg}", file=sys.stderr, flush=True)
         error_result = {
             "id": None,
             "success": False,
-            "error": str(e) + "\\n" + traceback.format_exc()
+            "error": error_msg
         }
         print(json.dumps(error_result), flush=True)
 `;
@@ -203,28 +213,55 @@ for line in sys.stdin:
     for (const line of lines) {
       if (!line.trim()) continue;
       
-      try {
-        const response = JSON.parse(line);
-        const requestId = response.id;
-        const handler = pendingRequests.get(requestId);
-        
-        if (handler) {
-          pendingRequests.delete(requestId);
-          if (response.success) {
-            handler.resolve(response);
-          } else {
-            handler.reject(new Error(response.error || "Unknown error"));
+      // Check if line looks like JSON (starts with {)
+      if (line.trim().startsWith("{")) {
+        try {
+          const response = JSON.parse(line);
+          const requestId = response.id;
+          const handler = pendingRequests.get(requestId);
+          
+          if (handler) {
+            pendingRequests.delete(requestId);
+            if (response.success) {
+              handler.resolve(response);
+            } else {
+              handler.reject(new Error(response.error || "Unknown error"));
+            }
           }
+        } catch (e) {
+          // Not valid JSON, might be a log message - send to log panel
+          console.log(`[DirectCommand] ${line}`);
         }
-      } catch (e) {
-        console.error("[DirectCommand] Failed to parse response:", line);
+      } else {
+        // Not JSON, treat as log message
+        console.log(`[DirectCommand] ${line}`);
       }
     }
   });
 
   persistentPythonProcess.stderr?.on("data", (data: Buffer) => {
     const chunk = data.toString();
+    // Log stderr to console (which will send to log panel)
     console.error("[DirectCommand] stderr:", chunk);
+    // Also try to parse as JSON error response
+    try {
+      const lines = chunk.split("\n").filter(l => l.trim());
+      for (const line of lines) {
+        if (line.trim().startsWith("{")) {
+          const response = JSON.parse(line);
+          if (response.id !== undefined) {
+            const requestId = response.id;
+            const handler = pendingRequests.get(requestId);
+            if (handler) {
+              pendingRequests.delete(requestId);
+              handler.reject(new Error(response.error || "Unknown error"));
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Not JSON, just log it
+    }
   });
 
   persistentPythonProcess.on("close", (code) => {

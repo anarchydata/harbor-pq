@@ -13,6 +13,8 @@ interface DataFramePreviewProps {
   onCancel?: () => void;
   onExport?: (format: "csv" | "xlsx" | "pbit") => void;
   onConnectExcel?: () => void;
+  onImportExcel?: () => void;
+  onWriteExcel?: () => void;
   isExecuting?: boolean;
   isInitializing?: boolean;
 }
@@ -61,6 +63,8 @@ export const DataFramePreview = memo(function DataFramePreview({
   onCancel,
   onExport,
   onConnectExcel,
+  onImportExcel,
+  onWriteExcel,
   isExecuting = false,
   isInitializing = false,
 }: DataFramePreviewProps) {
@@ -111,7 +115,7 @@ export const DataFramePreview = memo(function DataFramePreview({
   }, [previewData]);
 
   return (
-    <div className={`dataframe-preview ${isDisabled ? "dataframe-preview-disabled" : ""}`}>
+    <div className={`dataframe-preview ${isDisabled || isExecuting || isInitializing ? "dataframe-preview-disabled" : ""}`}>
       <div className="dataframe-toolbar">
         {isExecuting ? (
           <button
@@ -169,6 +173,24 @@ export const DataFramePreview = memo(function DataFramePreview({
 
         <button
           className="toolbar-button"
+          onClick={onImportExcel}
+          title="Import from Excel"
+        >
+          <span className="codicon">&#xea72;</span>
+          <span>Import from Excel</span>
+        </button>
+
+        <button
+          className="toolbar-button"
+          onClick={onWriteExcel}
+          title="Write PQ to Excel"
+        >
+          <span className="codicon">&#xea72;</span>
+          <span>Write to Excel</span>
+        </button>
+
+        <button
+          className="toolbar-button"
           onClick={onConnectExcel}
           title="Connect Excel"
         >
@@ -187,9 +209,12 @@ export const DataFramePreview = memo(function DataFramePreview({
       </div>
 
       <div className="dataframe-grid-container">
-        {isInitializing ? (
+        {isInitializing || isExecuting ? (
           <div className="dataframe-empty">
             <div className="spinner-ring"></div>
+            <div style={{ marginTop: "10px", color: "#858585" }}>
+              {isInitializing ? "Initializing..." : "Executing..."}
+            </div>
           </div>
         ) : previewData.length === 0 ? (
           <div className="dataframe-empty">

@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // File operations
   openFile: () => ipcRenderer.invoke("open-file"),
   connectExcel: (path: string) => ipcRenderer.invoke("connect-excel", path),
+  listExcelSheets: (filePath: string) => ipcRenderer.invoke("list-excel-sheets", filePath),
+  readExcelData: (filePath: string, selection: any) => ipcRenderer.invoke("read-excel-data", filePath, selection),
+  writePQToExcel: (options: { filePath: string; mCode: string; queryName?: string }) =>
+    ipcRenderer.invoke("write-pq-to-excel", options),
   export: (options: { format: string; path?: string }) =>
     ipcRenderer.invoke("export", options),
 
@@ -37,6 +41,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onExcelConnected: (callback: (status: any) => void) => {
     ipcRenderer.on("excel:connected", (event, status) => callback(status));
   },
+  onPQWritten: (callback: (result: any) => void) => {
+    ipcRenderer.on("pq:written", (event, result) => callback(result));
+  },
   onExecutionCancelled: (callback: () => void) => {
     ipcRenderer.on("execution:cancelled", () => callback());
   },
@@ -46,8 +53,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onDiagnosticsDetails: (callback: (diagnostics: any[]) => void) => {
     ipcRenderer.on("diagnostics:details", (event, diagnostics) => callback(diagnostics));
   },
-  onLogMessage: (callback: (logData: { level: string; message: string; timestamp?: number }) => void) => {
-    ipcRenderer.on("log:message", (event, logData) => callback(logData));
-  },
+      onLogMessage: (callback: (logData: { level: string; message: string; timestamp?: number }) => void) => {
+        ipcRenderer.on("log:message", (event, logData) => callback(logData));
+      },
+      sendLog: (level: string, message: string) => {
+        ipcRenderer.send("renderer:log", { level, message, timestamp: Date.now() });
+      },
 });
 

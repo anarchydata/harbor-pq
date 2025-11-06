@@ -64,7 +64,9 @@ function cleanCodeText(text: string): string {
   
   // Pass 8: Final safety check - remove any remaining incomplete HTML tags
   // But DON'T remove standalone > characters (they might be valid in M code)
-  cleaned = cleaned.replace(/<[^>]*$/g, ''); // Remove incomplete tags at end of string
+  // CRITICAL: Don't remove incomplete tags at end - this can truncate valid M code!
+  // Only remove incomplete tags if they're clearly HTML (contain common HTML tag names)
+  // cleaned = cleaned.replace(/<[^>]*$/g, ''); // DISABLED - was truncating code
   
   return cleaned;
 }
@@ -158,7 +160,9 @@ export function MCodeEditor({
       const lastCleaned = lastCleanedCodeRef.current || "";
       
       // If cleaned code is different from last cleaned (or is first time), update
-      if (cleanCode !== lastCleaned && cleanCode.length > 0) {
+      // Always use the exact code from props - don't skip if it matches lastCleaned
+      // This ensures we always display the exact code from chat without truncation
+      if (cleanCode !== lastCleaned || (cleanCode.length > 0 && lastCleaned.length === 0)) {
         const oldLines = previousCodeLinesRef.current;
         const newLines = cleanCode.split("\n");
         const newLineCount = newLines.length;

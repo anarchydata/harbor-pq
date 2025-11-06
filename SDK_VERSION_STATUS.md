@@ -51,3 +51,5 @@ The Power Query SDK has a version dependency chain:
 **Error**: "Cannot create process" - SDK can't launch container
 **Next Steps**: Need to find a compatible SDK version or workaround
 
+
+
