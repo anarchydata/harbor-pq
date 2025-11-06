@@ -1,9 +1,11 @@
 /**
  * DirectCommand Runner - Wraps Python DirectCommand for executing M code
  * Uses the direct SDK implementation via Python.NET
+ * 
+ * OPTIMIZED: Uses a persistent Python process to avoid startup overhead
  */
 
-import { spawn } from "child_process";
+import { spawn, ChildProcess } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -49,58 +51,52 @@ function extractQueryName(mCode: string): string {
   return "Query1";
 }
 
+// Persistent Python process for DirectCommand
+let persistentPythonProcess: ChildProcess | null = null;
+let processReady: boolean = false;
+let pendingRequests: Map<number, { resolve: (value: DirectCommandResponse) => void; reject: (error: Error) => void }> = new Map();
+let requestIdCounter: number = 0;
+let processBuffer: string = "";
+
 /**
- * Execute M code using DirectCommand via Python
+ * Start the persistent Python process if not already running
  */
-export async function executeWithDirectCommand(
-  mCode: string,
-  timeoutMs: number = 30000
-): Promise<DirectCommandResponse> {
-  return new Promise((resolve, reject) => {
-    try {
-      // Extract query name from M code
-      const queryName = extractQueryName(mCode);
-      
-      console.log("[DirectCommand] Executing M code with DirectCommand");
-      console.log("[DirectCommand] Query name:", queryName);
-      console.log("[DirectCommand] M code length:", mCode.length);
-      
-      // Find Python executable
-      const pythonCmd = process.platform === "win32" ? "python" : "python3";
-      
-      // Encode M code as base64 to safely pass through command line
-      const mCodeB64 = Buffer.from(mCode, "utf8").toString("base64");
-      
-      // Create a temporary Python script to execute DirectCommand
-      const projectRoot = path.resolve(__dirname, "..", "..");
-      const powerQueryNetDir = path.join(projectRoot, "PowerQueryNet");
-      const scriptPath = path.join(__dirname, "..", "..", "execute_direct_command.py");
-      const projectRootEscaped = projectRoot.replace(/\\/g, "\\\\");
-      const powerQueryNetEscaped = powerQueryNetDir.replace(/\\/g, "\\\\");
-      const scriptContent = `#!/usr/bin/env python
-"""Temporary script to execute DirectCommand"""
+function startPersistentProcess(): void {
+  if (persistentPythonProcess && !persistentPythonProcess.killed) {
+    return; // Already running
+  }
+
+  console.log("[DirectCommand] Starting persistent Python process...");
+  
+  const pythonCmd = process.platform === "win32" ? "python" : "python3";
+  const projectRoot = path.resolve(__dirname, "..", "..");
+  const powerQueryNetDir = path.join(projectRoot, "PowerQueryNet");
+  const scriptPath = path.join(projectRoot, "execute_direct_command_persistent.py");
+  
+  const projectRootEscaped = projectRoot.replace(/\\/g, "\\\\");
+  const powerQueryNetEscaped = powerQueryNetDir.replace(/\\/g, "\\\\");
+  
+  // Create persistent script that reads commands from stdin
+  const scriptContent = `#!/usr/bin/env python
+"""Persistent script to execute DirectCommand via stdin/stdout"""
 import sys
 import json
 import os
 import importlib.util
 from pathlib import Path
 
-# Add paths - use absolute paths provided, not relative to script location
+# Add paths
 sys.path.insert(0, r'${projectRootEscaped}')
 sys.path.insert(0, r'${powerQueryNetEscaped}')
 
 try:
-    # Use correct case: PowerQueryNet (capital letters)
     from PowerQueryNet.command_direct import DirectCommand
 except ImportError as e:
-    # If package import fails, try direct file import
     try:
         command_direct_path = Path(r'${powerQueryNetEscaped}') / "command_direct.py"
         spec = importlib.util.spec_from_file_location("command_direct", str(command_direct_path))
         if spec and spec.loader:
             command_direct = importlib.util.module_from_spec(spec)
-            # Load dependencies first
-            sys.path.insert(0, str(current_dir))
             sys.path.insert(0, str(Path(r'${powerQueryNetEscaped}').parent))
             spec.loader.exec_module(command_direct)
             DirectCommand = command_direct.DirectCommand
@@ -109,162 +105,245 @@ except ImportError as e:
     except Exception as e2:
         raise ImportError(f"Package import failed: {e}, File import failed: {e2}")
 
-# Get m_code and query name from command line args
-# Args are passed as JSON string to handle special characters
-import base64
-m_code_b64 = sys.argv[1]
-query_name = sys.argv[2]
+# Initialize SDK once (happens when first DirectCommand is created)
+print("READY", flush=True)
 
-# Decode M code
-m_code = base64.b64decode(m_code_b64).decode('utf-8')
-
-# Execute
-cmd = DirectCommand()
-try:
-    response = cmd.execute(query_name=query_name, m_code=m_code)
+# Read commands from stdin line by line
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
     
-    # Convert to JSON
-    result = {
-        "success": True,
-        "data": {
-            "columns": response.data_table.columns if response.data_table else [],
-            "rows": response.data_table.rows if response.data_table else [],
-            "rowCount": len(response.data_table.rows) if response.data_table else 0,
-            "columnCount": len(response.data_table.columns) if response.data_table else 0,
-            "engine": "DirectCommand",
-            "elapsedMs": 0
+    try:
+        request = json.loads(line)
+        request_id = request.get("id")
+        m_code = request.get("m_code")
+        query_name = request.get("query_name")
+        
+        if not m_code or not query_name:
+            response = {
+                "id": request_id,
+                "success": False,
+                "error": "Missing m_code or query_name"
+            }
+            print(json.dumps(response), flush=True)
+            continue
+        
+        # Create new DirectCommand instance and execute
+        cmd = DirectCommand()
+        try:
+            response = cmd.execute(query_name=query_name, m_code=m_code)
+            
+            result = {
+                "id": request_id,
+                "success": True,
+                "data": {
+                    "columns": response.data_table.columns if response.data_table else [],
+                    "rows": response.data_table.rows if response.data_table else [],
+                    "rowCount": len(response.data_table.rows) if response.data_table else 0,
+                    "columnCount": len(response.data_table.columns) if response.data_table else 0,
+                    "engine": "DirectCommand",
+                    "elapsedMs": 0
+                }
+            }
+            print(json.dumps(result), flush=True)
+        except Exception as e:
+            import traceback
+            error_result = {
+                "id": request_id,
+                "success": False,
+                "error": str(e) + "\\n" + traceback.format_exc()
+            }
+            print(json.dumps(error_result), flush=True)
+    except json.JSONDecodeError as e:
+        error_result = {
+            "id": None,
+            "success": False,
+            "error": f"Invalid JSON: {e}"
         }
-    }
-    print(json.dumps(result))
-except Exception as e:
-    import traceback
-    error_result = {
-        "success": False,
-        "error": str(e) + "\\n" + traceback.format_exc()
-    }
-    print(json.dumps(error_result))
-    sys.exit(1)
+        print(json.dumps(error_result), flush=True)
+    except Exception as e:
+        import traceback
+        error_result = {
+            "id": None,
+            "success": False,
+            "error": str(e) + "\\n" + traceback.format_exc()
+        }
+        print(json.dumps(error_result), flush=True)
 `;
+
+  // Write persistent script
+  fs.writeFileSync(scriptPath, scriptContent, "utf8");
+
+  // Spawn persistent process
+  persistentPythonProcess = spawn(pythonCmd, [scriptPath], {
+    cwd: projectRoot,
+    env: { ...process.env, PYTHONUNBUFFERED: "1" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  processReady = false;
+  processBuffer = "";
+
+  persistentPythonProcess.stdout?.on("data", (data: Buffer) => {
+    const chunk = data.toString();
+    processBuffer += chunk;
+    
+    // Check for "READY" signal
+    if (!processReady && processBuffer.includes("READY")) {
+      processReady = true;
+      console.log("[DirectCommand] ✓ Persistent process ready");
+      processBuffer = processBuffer.replace("READY", "").trim();
+    }
+    
+    // Process complete JSON responses (one per line)
+    const lines = processBuffer.split("\n");
+    processBuffer = lines.pop() || ""; // Keep incomplete line in buffer
+    
+    for (const line of lines) {
+      if (!line.trim()) continue;
       
-      // Write temporary script
-      fs.writeFileSync(scriptPath, scriptContent, "utf8");
-      
-      // Spawn Python process
-      const pythonProcess = spawn(pythonCmd, [scriptPath, mCodeB64, queryName], {
-        cwd: path.join(__dirname, "..", ".."),
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
-      });
-      
-      let stdout = "";
-      let stderr = "";
-      let timeoutId: NodeJS.Timeout | null = null;
-      
-      // Set timeout
-      if (timeoutMs > 0) {
-        timeoutId = setTimeout(() => {
-          pythonProcess.kill();
-          // Clean up script
-          try {
-            fs.unlinkSync(scriptPath);
-          } catch (e) {
-            // Ignore cleanup errors
+      try {
+        const response = JSON.parse(line);
+        const requestId = response.id;
+        const handler = pendingRequests.get(requestId);
+        
+        if (handler) {
+          pendingRequests.delete(requestId);
+          if (response.success) {
+            handler.resolve(response);
+          } else {
+            handler.reject(new Error(response.error || "Unknown error"));
           }
-          reject(new Error(`DirectCommand execution timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
+        }
+      } catch (e) {
+        console.error("[DirectCommand] Failed to parse response:", line);
+      }
+    }
+  });
+
+  persistentPythonProcess.stderr?.on("data", (data: Buffer) => {
+    const chunk = data.toString();
+    console.error("[DirectCommand] stderr:", chunk);
+  });
+
+  persistentPythonProcess.on("close", (code) => {
+    console.log(`[DirectCommand] Persistent process exited with code ${code}`);
+    persistentPythonProcess = null;
+    processReady = false;
+    
+    // Reject all pending requests
+    for (const handler of pendingRequests.values()) {
+      handler.reject(new Error("Python process terminated"));
+    }
+    pendingRequests.clear();
+  });
+
+  persistentPythonProcess.on("error", (error) => {
+    console.error("[DirectCommand] Failed to start persistent process:", error);
+    persistentPythonProcess = null;
+    processReady = false;
+    
+    // Reject all pending requests
+    for (const handler of pendingRequests.values()) {
+      handler.reject(new Error(`Failed to start Python process: ${error.message}`));
+    }
+    pendingRequests.clear();
+  });
+}
+
+/**
+ * Wait for the persistent process to be ready
+ */
+function waitForReady(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (processReady) {
+      resolve();
+      return;
+    }
+    
+    const checkInterval = setInterval(() => {
+      if (processReady) {
+        clearInterval(checkInterval);
+        clearTimeout(timeout);
+        resolve();
+      } else if (!persistentPythonProcess || persistentPythonProcess.killed) {
+        clearInterval(checkInterval);
+        clearTimeout(timeout);
+        reject(new Error("Python process failed to start"));
+      }
+    }, 10); // Check every 10ms
+    
+    const timeout = setTimeout(() => {
+      clearInterval(checkInterval);
+      reject(new Error("Python process ready timeout"));
+    }, 5000); // 5 second timeout for initialization
+  });
+}
+
+/**
+ * Execute M code using DirectCommand via persistent Python process
+ */
+export async function executeWithDirectCommand(
+  mCode: string,
+  timeoutMs: number = 10000
+): Promise<DirectCommandResponse> {
+  return new Promise(async (resolve, reject) => {
+    try {
+      // Start persistent process if needed
+      if (!persistentPythonProcess || persistentPythonProcess.killed) {
+        startPersistentProcess();
       }
       
-      pythonProcess.stdout.on("data", (data) => {
-        stdout += data.toString();
-      });
+      // Wait for process to be ready
+      await waitForReady();
       
-      pythonProcess.stderr.on("data", (data) => {
-        const chunk = data.toString();
-        stderr += chunk;
-        console.error("[DirectCommand] stderr chunk:", chunk);
-      });
+      // Extract query name from M code
+      const queryName = extractQueryName(mCode);
       
-      pythonProcess.on("close", (code) => {
-        // Clear timeout
-        if (timeoutId) {
+      // Generate request ID
+      const requestId = ++requestIdCounter;
+      
+      // Store handlers
+      pendingRequests.set(requestId, { resolve, reject });
+      
+      // Set timeout
+      const timeoutId = setTimeout(() => {
+        pendingRequests.delete(requestId);
+        reject(new Error(`DirectCommand execution timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      
+      // Override resolve/reject to clear timeout
+      const originalResolve = resolve;
+      const originalReject = reject;
+      pendingRequests.set(requestId, {
+        resolve: (value) => {
           clearTimeout(timeoutId);
-        }
-        
-        // Clean up script
-        try {
-          fs.unlinkSync(scriptPath);
-        } catch (e) {
-          // Ignore cleanup errors
-        }
-        
-        console.log(`[DirectCommand] Process exited with code ${code}`);
-        console.log(`[DirectCommand] stdout length: ${stdout.length}, stderr length: ${stderr.length}`);
-        
-        if (code !== 0) {
-          // Log full error details
-          console.error(`[DirectCommand] ✗ Process failed with code ${code}`);
-          console.error(`[DirectCommand] Full stdout:`, stdout);
-          console.error(`[DirectCommand] Full stderr:`, stderr);
-          
-          // Try to extract error from JSON if stdout contains it
-          if (stdout.trim()) {
-            try {
-              const errorResult = JSON.parse(stdout);
-              if (errorResult.error) {
-                reject(new Error(errorResult.error));
-                return;
-              }
-            } catch (e) {
-              // Not JSON, use stdout as error
-            }
-          }
-          
-          const errorMsg = stderr.trim() || stdout.trim() || `DirectCommand process exited with code ${code}`;
-          reject(new Error(errorMsg));
-          return;
-        }
-        
-        try {
-          // Parse JSON response
-          const trimmedStdout = stdout.trim();
-          if (!trimmedStdout) {
-            reject(new Error(`DirectCommand returned empty output. stderr: ${stderr || "none"}`));
-            return;
-          }
-          
-          const result = JSON.parse(trimmedStdout);
-          
-          if (result.success) {
-            console.log("[DirectCommand] ✓ Execution successful");
-            console.log("[DirectCommand] Rows:", result.data.rowCount, "Columns:", result.data.columnCount);
-            resolve(result);
-          } else {
-            const errorMsg = result.error || "Unknown error";
-            console.error("[DirectCommand] Execution failed:", errorMsg);
-            reject(new Error(errorMsg));
-          }
-        } catch (parseError) {
-          console.error("[DirectCommand] Failed to parse response. stdout:", stdout);
-          console.error("[DirectCommand] stderr:", stderr);
-          const errorMsg = `Failed to parse DirectCommand response: ${parseError}. stdout: ${stdout.substring(0, 500)}`;
-          reject(new Error(errorMsg));
-        }
+          originalResolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timeoutId);
+          originalReject(error);
+        },
       });
       
-      pythonProcess.on("error", (error) => {
-        // Clear timeout
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-        }
-        
-        // Clean up script
-        try {
-          fs.unlinkSync(scriptPath);
-        } catch (e) {
-          // Ignore cleanup errors
-        }
-        
-        reject(new Error(`Failed to spawn DirectCommand process: ${error.message}`));
-      });
+      // Send request to Python process
+      const request = {
+        id: requestId,
+        m_code: mCode,
+        query_name: queryName,
+      };
+      
+      if (!persistentPythonProcess?.stdin?.writable) {
+        pendingRequests.delete(requestId);
+        clearTimeout(timeoutId);
+        reject(new Error("Python process stdin is not writable"));
+        return;
+      }
+      
+      persistentPythonProcess.stdin.write(JSON.stringify(request) + "\n");
+      
+      console.log("[DirectCommand] Sent request", requestId, "Query:", queryName);
     } catch (error) {
       reject(error);
     }
@@ -399,4 +478,3 @@ except Exception as e:
     }
   });
 }
-

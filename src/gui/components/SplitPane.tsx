@@ -25,11 +25,12 @@ export function SplitPane({
   storageKey,
 }: SplitPaneProps) {
   const [size, setSize] = useState(() => {
+    const clamp = (val: number) => Math.max(minSize, Math.min(maxSize, val));
     if (storageKey) {
       const saved = localStorage.getItem(storageKey);
-      if (saved) return parseFloat(saved);
+      if (saved) return clamp(parseFloat(saved));
     }
-    return defaultSize;
+    return clamp(defaultSize);
   });
 
   const [isDragging, setIsDragging] = useState(false);
@@ -39,24 +40,31 @@ export function SplitPane({
 
   const saveSize = useCallback(
     (newSize: number) => {
-      setSize(newSize);
+      const clamped = Math.max(minSize, Math.min(maxSize, newSize));
+      setSize(clamped);
       if (storageKey) {
-        localStorage.setItem(storageKey, newSize.toString());
+        localStorage.setItem(storageKey, clamped.toString());
       }
-      onResize?.(newSize);
+      onResize?.(clamped);
     },
-    [storageKey, onResize]
+    [storageKey, onResize, minSize, maxSize]
   );
 
-  // Update size if defaultSize changes externally
+  // Update/clamp size if defaultSize or limits change
   useEffect(() => {
-    if (defaultSize !== size && storageKey) {
+    const clamp = (val: number) => Math.max(minSize, Math.min(maxSize, val));
+    if (storageKey) {
       const saved = localStorage.getItem(storageKey);
-      if (!saved) {
-        setSize(defaultSize);
+      if (saved) {
+        const clamped = clamp(parseFloat(saved));
+        if (clamped !== size) setSize(clamped);
+      } else if (defaultSize !== size) {
+        setSize(clamp(defaultSize));
       }
+    } else if (defaultSize !== size) {
+      setSize(clamp(defaultSize));
     }
-  }, [defaultSize, storageKey, size]);
+  }, [defaultSize, storageKey, size, minSize, maxSize]);
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -83,12 +91,8 @@ export function SplitPane({
 
       const delta = currentPos - startPos;
       const deltaPercent = (delta / containerSize) * 100;
-      const newSize = Math.max(
-        minSize,
-        Math.min(maxSize, startSizeRef.current + deltaPercent)
-      );
-
-      saveSize(newSize);
+      const newSize = startSizeRef.current + deltaPercent;
+      saveSize(newSize); // saveSize will clamp it
     },
     [isDragging, direction, minSize, maxSize, saveSize]
   );

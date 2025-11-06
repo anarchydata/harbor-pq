@@ -8,6 +8,7 @@ import "./MCodeEditor.css";
 interface MCodeEditorProps {
   code?: string;
   onCodeChange?: (code: string) => void;
+  highlightedLines?: number[]; // Line numbers to highlight (1-based)
 }
 
 // Clean text - aggressively remove any HTML or markup
@@ -122,6 +123,7 @@ function highlightMCode(text: string): string {
 export function MCodeEditor({
   code = "",
   onCodeChange,
+  highlightedLines = [],
 }: MCodeEditorProps) {
   // CRITICAL: Clean the initial code immediately to prevent HTML leakage
   const initialCleanCode = cleanCodeText(code || "");
@@ -354,16 +356,36 @@ export function MCodeEditor({
           />
           
           {/* Highlight overlay for new code lines */}
-          {newCodeLines.map((lineNum) => (
-            <div
-              key={lineNum}
-              className="mcode-highlight-new"
-              style={{
-                top: `${lineNum * 20}px`,
-                height: "20px",
-              }}
-            />
-          ))}
+          {newCodeLines.map((lineNum) => {
+            // Account for padding (--spacing-md = 12px) and line height (20px)
+            const topOffset = 12 + (lineNum - 1) * 20; // padding-top + (lineNum - 1) * line-height
+            return (
+              <div
+                key={`new-${lineNum}`}
+                className="mcode-highlight-new"
+                style={{
+                  top: `${topOffset}px`,
+                  height: "20px",
+                }}
+              />
+            );
+          })}
+          
+          {/* Red highlight overlay for selected step lines */}
+          {highlightedLines.map((lineNum) => {
+            // Account for padding (--spacing-md = 12px) and line height (20px)
+            const topOffset = 12 + (lineNum - 1) * 20; // padding-top + (lineNum - 1) * line-height
+            return (
+              <div
+                key={`highlight-${lineNum}`}
+                className="mcode-highlight-step"
+                style={{
+                  top: `${topOffset}px`,
+                  height: "20px",
+                }}
+              />
+            );
+          })}
         </div>
       </div>
     </div>

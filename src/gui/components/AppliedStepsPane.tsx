@@ -2,7 +2,7 @@
  * Applied Steps Pane - Displays Power Query steps from M code
  */
 
-import React from "react";
+import React, { memo } from "react";
 import "./AppliedStepsPane.css";
 
 export interface Step {
@@ -17,7 +17,20 @@ interface AppliedStepsPaneProps {
   onStepClick: (step: Step) => void;
 }
 
-export function AppliedStepsPane({
+// Memoized step item for performance
+const StepItem = memo(({ step, isSelected, onClick }: { step: Step; isSelected: boolean; onClick: () => void }) => (
+  <div
+    className={`applied-steps-item ${isSelected ? "applied-steps-item-selected" : ""}`}
+    onClick={onClick}
+    title={`Line ${step.line}: ${step.name}`}
+  >
+    <span className="applied-steps-item-name">{step.name}</span>
+  </div>
+));
+
+StepItem.displayName = "StepItem";
+
+export const AppliedStepsPane = memo(function AppliedStepsPane({
   steps,
   selectedStepId,
   onStepClick,
@@ -32,20 +45,16 @@ export function AppliedStepsPane({
           <div className="applied-steps-empty">No steps found</div>
         ) : (
           steps.map((step) => (
-            <div
+            <StepItem
               key={step.id}
-              className={`applied-steps-item ${
-                selectedStepId === step.id ? "applied-steps-item-selected" : ""
-              }`}
+              step={step}
+              isSelected={selectedStepId === step.id}
               onClick={() => onStepClick(step)}
-              title={`Line ${step.line}: ${step.name}`}
-            >
-              <span className="applied-steps-item-name">{step.name}</span>
-            </div>
+            />
           ))
         )}
       </div>
     </div>
   );
-}
+});
 

@@ -333,17 +333,8 @@ function createLogWindow() {
 </html>
   `)}`);
 
-  logWindow.once("ready-to-show", () => {
-    try {
-      if (logWindow && !logWindow.isDestroyed()) {
-        console.log("[Electron] Log window ready to show");
-        // Only show when explicitly requested via IPC handler
-        // The IPC handler will call show() explicitly
-      }
-    } catch (e) {
-      console.error("[Electron] Error in log window ready-to-show:", e);
-    }
-  });
+  // DO NOT auto-show the log window - it should ONLY open when explicitly requested via F12 or status bar button
+  // Removed ready-to-show handler to prevent any auto-showing
 
   logWindow.on("close", (event) => {
     // Allow the window to close normally
@@ -601,8 +592,8 @@ The user's current M code will be provided. Respond with the complete updated M 
     console.log(`Server running at ${url}`);
     mainWindow?.loadURL(url);
     
-    // Enable DevTools to see renderer process logs (console.log from React components)
-    mainWindow?.webContents.openDevTools();
+    // DevTools disabled - only open manually via Ctrl+Shift+I or F12 if needed
+    // mainWindow?.webContents.openDevTools();
   });
 
   mainWindow.once("ready-to-show", () => {

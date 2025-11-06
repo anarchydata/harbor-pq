@@ -2,7 +2,7 @@
  * Data frame preview grid with toolbar
  */
 
-import React, { useState } from "react";
+import React, { useState, useMemo, memo } from "react";
 import "./DataFramePreview.css";
 
 interface DataFramePreviewProps {
@@ -17,7 +17,43 @@ interface DataFramePreviewProps {
   isInitializing?: boolean;
 }
 
-export function DataFramePreview({
+// Memoized table row component for performance
+const TableRow = memo(({ row, rowIdx }: { row: any[]; rowIdx: number }) => (
+  <tr>
+    {row.map((cell, cellIdx) => (
+      <td key={cellIdx} className="dataframe-cell">
+        {String(cell ?? "")}
+      </td>
+    ))}
+  </tr>
+));
+
+TableRow.displayName = "TableRow";
+
+// Memoized table header component
+const TableHeader = memo(({ columns }: { columns: string[] }) => (
+  <thead>
+    <tr>
+      {columns.map((col, idx) => (
+        <th key={idx} className="dataframe-header">
+          <div className="dataframe-header-content">
+            <span>{col}</span>
+            <button
+              className="dataframe-header-menu"
+              title="Column Menu"
+            >
+              ⋮
+            </button>
+          </div>
+        </th>
+      ))}
+    </tr>
+  </thead>
+));
+
+TableHeader.displayName = "TableHeader";
+
+export const DataFramePreview = memo(function DataFramePreview({
   data = [],
   columns = [],
   rowCount = 0,
@@ -46,18 +82,33 @@ export function DataFramePreview({
     setTimeout(() => columnSearchRef.current?.focus(), 0);
   };
 
-  // Sample data for preview
-  const previewData = data.length > 0 ? data : [];
-  const previewColumns =
-    columns.length > 0
-      ? columns
-      : Array.from({ length: columnCount || 5 }, (_, i) => `Column${i + 1}`);
+  // Memoize expensive calculations
+  const { previewData, previewColumns, displayedRows, totalRows, isDisabled } = useMemo(() => {
+    const previewData = data.length > 0 ? data : [];
+    const previewColumns =
+      columns.length > 0
+        ? columns
+        : Array.from({ length: columnCount || 5 }, (_, i) => `Column${i + 1}`);
+    const displayedRows = Math.min(previewData.length, 100);
+    const totalRows = rowCount || previewData.length;
+    const isDisabled = isInitializing || (data.length === 0 && !isExecuting);
+    
+    return { previewData, previewColumns, displayedRows, totalRows, isDisabled };
+  }, [data, columns, columnCount, rowCount, isInitializing, isExecuting]);
 
-  const isDisabled = isInitializing || (data.length === 0 && !isExecuting);
-  
-  // Calculate actual number of rows being displayed (max 100 for preview)
-  const displayedRows = Math.min(previewData.length, 100);
-  const totalRows = rowCount || previewData.length;
+  // Memoize the sliced data for table rendering (only first 100 rows)
+  // Use a more efficient slice that avoids creating intermediate arrays
+  const tableRows = useMemo(() => {
+    if (previewData.length === 0) return [];
+    const maxRows = Math.min(previewData.length, 100);
+    // Direct array creation is faster than slice for small arrays
+    if (previewData.length <= 100) return previewData;
+    const result: any[][] = [];
+    for (let i = 0; i < maxRows; i++) {
+      result[i] = previewData[i];
+    }
+    return result;
+  }, [previewData]);
 
   return (
     <div className={`dataframe-preview ${isDisabled ? "dataframe-preview-disabled" : ""}`}>
@@ -149,32 +200,10 @@ export function DataFramePreview({
           </div>
         ) : (
           <table className="dataframe-grid">
-            <thead>
-              <tr>
-                {previewColumns.map((col, idx) => (
-                  <th key={idx} className="dataframe-header">
-                    <div className="dataframe-header-content">
-                      <span>{col}</span>
-                      <button
-                        className="dataframe-header-menu"
-                        title="Column Menu"
-                      >
-                        ⋮
-                      </button>
-                    </div>
-                  </th>
-                ))}
-              </tr>
-            </thead>
+            <TableHeader columns={previewColumns} />
             <tbody>
-              {previewData.slice(0, 100).map((row, rowIdx) => (
-                <tr key={rowIdx}>
-                  {row.map((cell, cellIdx) => (
-                    <td key={cellIdx} className="dataframe-cell">
-                      {String(cell ?? "")}
-                    </td>
-                  ))}
-                </tr>
+              {tableRows.map((row, rowIdx) => (
+                <TableRow key={rowIdx} row={row} rowIdx={rowIdx} />
               ))}
             </tbody>
           </table>
@@ -193,5 +222,5 @@ export function DataFramePreview({
       </div>
     </div>
   );
-}
+});
 

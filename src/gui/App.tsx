@@ -2,7 +2,7 @@
  * Main VS Code-style Power Query IDE App
  */
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, startTransition, useMemo } from "react";
 import { SplitPane } from "./components/SplitPane";
 import { TabsBar, Tab } from "./components/TabsBar";
 import { DataFramePreview } from "./components/DataFramePreview";
@@ -106,11 +106,36 @@ in
             stepName = stepName.slice(1, -1); // Remove quotes
           }
           
-          // Verify this looks like a step definition (not part of a larger expression)
-          // Steps typically end with comma or are the last line before 'in'
-          const isStepEnd = line.includes(",") || 
-                           i === lines.length - 1 || 
-                           (i < lines.length - 1 && lines[i + 1].trim().match(/^(in|let)/i));
+          // Verify this looks like a step definition
+          // Steps can be:
+          // 1. Single line ending with comma
+          // 2. Multi-line (check if next non-empty line is a new step or "in")
+          // 3. Last step before "in"
+          let isStepEnd = false;
+          
+          if (line.includes(",")) {
+            // Single-line step ending with comma
+            isStepEnd = true;
+          } else {
+            // Multi-line step - check if next non-empty line is a new step or "in"
+            for (let j = i + 1; j < lines.length; j++) {
+              const nextLine = lines[j].trim();
+              if (nextLine === "") continue; // Skip empty lines
+              if (nextLine.match(/^in\s*$/i)) {
+                isStepEnd = true; // Next non-empty line is "in"
+                break;
+              }
+              if (nextLine.match(stepPattern)) {
+                isStepEnd = true; // Next non-empty line is a new step
+                break;
+              }
+              // If we find a closing parenthesis/bracket, it might be the end of this step
+              if (nextLine.match(/^[\)\]\}],?\s*$/)) {
+                isStepEnd = true;
+                break;
+              }
+            }
+          }
           
           if (isStepEnd) {
             extracted.push({
@@ -158,19 +183,152 @@ in
   const [showLogPanel, setShowLogPanel] = useState(false);
   const [codeSplitSize, setCodeSplitSize] = useState(50);
   const [selectedStepId, setSelectedStepId] = useState<string | undefined>(undefined);
+  const [highlightedStepLines, setHighlightedStepLines] = useState<number[]>([]);
+  
+  // Cache for step results: stepId -> { rows, columns, rowCount, columnCount }
+  const stepCacheRef = useRef<Map<string, { rows: any[][]; columns: string[]; rowCount: number; columnCount: number }>>(new Map());
+  
+  // Track which step is currently being executed (for caching)
+  const executingStepIdRef = useRef<string | undefined>(undefined);
+
+  // Calculate which lines belong to a step (from step definition to last comma before next step)
+  const getStepLines = useCallback((code: string, step: Step): number[] => {
+    const lines = code.split("\n");
+    const stepLine = step.line - 1; // Convert to 0-based
+    const stepLines: number[] = [];
+    const stepPattern = /^(#?"[^"]+"|[a-zA-Z_][a-zA-Z0-9_]*)\s*=/;
+    
+    // Start from the step definition line
+    for (let i = stepLine; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      
+      // Check if this is a new step (not the current one) - look for step pattern
+      if (i > stepLine) {
+        const match = trimmed.match(stepPattern);
+        if (match) {
+          // Found a new step - stop here (don't include this line)
+          break;
+        }
+        // Also check for "in" keyword
+        if (trimmed.match(/^in\s*$/i)) {
+          // Found "in" - stop here (don't include this line)
+          break;
+        }
+      }
+      
+      // Add this line to the step
+      stepLines.push(i + 1); // Convert back to 1-based
+      
+      // Check if this line ends with a comma and the next line starts a new step
+      // This means we've reached the end of the current step
+      if (i < lines.length - 1) {
+        const nextLine = lines[i + 1].trim();
+        const nextStepMatch = nextLine.match(stepPattern);
+        if (nextStepMatch) {
+          // Next line starts a new step - check if current line ends with comma
+          // If it does, we've found the end (including the comma)
+          // If it doesn't, we need to continue to find the comma
+          if (trimmed.endsWith(',')) {
+            // Perfect - we've included the comma, stop here
+            break;
+          }
+          // Current line doesn't end with comma, but next line is a new step
+          // This shouldn't happen in valid M code, but continue to include current line
+          // and stop before the next step
+          break;
+        }
+        // Check if next line is "in"
+        if (nextLine.match(/^in\s*$/i)) {
+          // Next line is "in" - check if current line ends with comma
+          if (trimmed.endsWith(',')) {
+            // Perfect - we've included the comma, stop here
+            break;
+          }
+          // Current line doesn't end with comma, but next line is "in"
+          // Continue to include current line and stop before "in"
+          break;
+        }
+      }
+    }
+    
+    return stepLines;
+  }, []);
+
+  // Track previous steps to detect new additions
+  const previousStepsRef = useRef<Array<{ id: string; name: string; line: number }>>([]);
 
   // Extract steps on initial load and when code changes
   useEffect(() => {
     const extractedSteps = extractSteps(mCode);
+    
+    // Clean up cache for steps that no longer exist
+    const currentStepIds = new Set(extractedSteps.map(s => s.id));
+    for (const [stepId] of stepCacheRef.current) {
+      if (!currentStepIds.has(stepId)) {
+        console.log(`[App] Removing cache for deleted step: ${stepId}`);
+        stepCacheRef.current.delete(stepId);
+      }
+    }
+    
+    // Detect if a new step was added (compare with previous)
+    const previousSteps = previousStepsRef.current;
+    if (extractedSteps.length > previousSteps.length) {
+      // New step(s) added - find the newest one(s)
+      const newSteps = extractedSteps.slice(previousSteps.length);
+      if (newSteps.length > 0) {
+        // Highlight the latest new step
+        const latestNewStep = newSteps[newSteps.length - 1];
+        setSelectedStepId(latestNewStep.id);
+        const lines = getStepLines(mCode, latestNewStep);
+        setHighlightedStepLines(lines);
+        console.log(`[App] New step detected: ${latestNewStep.name} (line ${latestNewStep.line})`);
+        
+        // If we have cached data from the latest execution, cache it for the new step
+        // This happens when a new step is added via chat/AI and executed
+        // The onDataframeUpdate handler will cache the latest step, but we also want to
+        // ensure any new steps get cached if data is available
+        // Note: The actual caching happens in onDataframeUpdate when execution completes
+      }
+    }
+    
+    // Update previous steps ref
+    previousStepsRef.current = extractedSteps;
     setSteps(extractedSteps);
-    // Reset selected step when code changes externally
+    
+    // If no step is selected and we have steps, select the latest (last) step
+    if (extractedSteps.length > 0 && !selectedStepId) {
+      const lastStep = extractedSteps[extractedSteps.length - 1];
+      setSelectedStepId(lastStep.id);
+      // Calculate and set highlighted lines for the latest step (but don't run it)
+      const lines = getStepLines(mCode, lastStep);
+      setHighlightedStepLines(lines);
+    }
+    
+    // Reset selected step when code changes externally if the step no longer exists
     if (selectedStepId) {
       const stepExists = extractedSteps.some(s => s.id === selectedStepId);
       if (!stepExists) {
-        setSelectedStepId(undefined);
+        // Select the latest step if available
+        if (extractedSteps.length > 0) {
+          const lastStep = extractedSteps[extractedSteps.length - 1];
+          setSelectedStepId(lastStep.id);
+          const lines = getStepLines(mCode, lastStep);
+          setHighlightedStepLines(lines);
+        } else {
+          setSelectedStepId(undefined);
+          setHighlightedStepLines([]);
+        }
+      } else {
+        // Step still exists - update highlighted lines
+        const step = extractedSteps.find(s => s.id === selectedStepId);
+        if (step) {
+          const lines = getStepLines(mCode, step);
+          setHighlightedStepLines(lines);
+        }
       }
     }
-  }, [mCode, extractSteps, selectedStepId]);
+  }, [mCode, extractSteps, selectedStepId, getStepLines]);
 
   // Reconstruct M code up to a selected step
   const reconstructCodeUpToStep = useCallback((code: string, targetStep: Step): string => {
@@ -193,6 +351,13 @@ in
       
       if (line.match(/^in\s*$/i)) {
         if (foundTargetStep) {
+          // Remove trailing comma from the last line if present
+          if (result.length > 0) {
+            const lastLine = result[result.length - 1];
+            // Remove trailing comma and whitespace
+            const cleaned = lastLine.replace(/,\s*$/, '');
+            result[result.length - 1] = cleaned;
+          }
           // Add the 'in' statement pointing to the target step
           result.push(`in`);
           result.push(`    ${targetStepName}`);
@@ -262,42 +427,70 @@ in
   }, []);
 
   // Handle step click - reconstruct and run code up to that step
+  // This executes directly without sending to chat
   const handleStepClick = useCallback(async (step: Step) => {
     setSelectedStepId(step.id);
+    
+    // Calculate and highlight the lines for this step
+    const lines = getStepLines(mCode, step);
+    setHighlightedStepLines(lines);
+    
+    // Check cache first
+    const cachedData = stepCacheRef.current.get(step.id);
+    if (cachedData) {
+      console.log(`[App] Using cached data for step: ${step.name}`);
+      // Use cached data - no execution needed, update preview immediately
+      setPreviewData(cachedData.rows);
+      setRowCount(cachedData.rowCount);
+      setColumnCount(cachedData.columnCount);
+      setPreviewColumns(cachedData.columns);
+      setIsStale(false);
+      setHasError(false);
+      setStatusBarError("");
+      setIsExecuting(false);
+      console.log(`[App] ✓ Preview updated from cache for step: ${step.name}`);
+      return; // Exit early - no execution needed
+    }
+    
+    // No cache - need to execute
+    console.log(`[App] No cache for step: ${step.name}, executing...`);
     
     // Reconstruct M code up to this step
     const reconstructedCode = reconstructCodeUpToStep(mCode, step);
     console.log(`[App] Running code up to step: ${step.name}`);
     console.log(`[App] Reconstructed code:\n${reconstructedCode}`);
     
-    // Execute the reconstructed code
+    // Track which step we're executing (for caching)
+    executingStepIdRef.current = step.id;
+    
+    // Execute the reconstructed code directly - DON'T set executingMCode to avoid chat messages
     if (window.electronAPI) {
       setIsExecuting(true);
-      setExecutingMCode(reconstructedCode);
+      // Don't set executingMCode - this prevents chat from showing execution messages
       setStatusBarError("");
       try {
         const result = await window.electronAPI.runAll(reconstructedCode);
         if (result.success) {
           setLastRunTime(new Date());
           setIsExecuting(false);
-          setExecutingMCode(undefined);
+          // Cache will be set in onDataframeUpdate handler
+          // executingStepIdRef will be cleared there after caching
         } else {
           setIsExecuting(false);
-          setExecutingMCode(undefined);
+          executingStepIdRef.current = undefined; // Clear on error
           setStatusBarError(result.error || "Execution failed");
           setHasError(true);
           setErrorMessage(result.error || "Execution failed");
         }
       } catch (error) {
         setIsExecuting(false);
-        setExecutingMCode(undefined);
         const errorMsg = `Error executing step: ${error instanceof Error ? error.message : "Unknown error"}`;
         setStatusBarError(errorMsg);
         setHasError(true);
         setErrorMessage(errorMsg);
       }
     }
-  }, [mCode, reconstructCodeUpToStep]);
+  }, [mCode, reconstructCodeUpToStep, getStepLines]);
 
   // Setup IPC listeners and initialize M code
   useEffect(() => {
@@ -336,24 +529,75 @@ in
       console.log("[App] ✓ onDataframeUpdate received");
       console.log("[App] Data summary: rows=", data.rowCount, "cols=", data.columnCount, "engine=", data.engine, "elapsed=", data.elapsedMs, "ms");
       console.log("[App] Columns:", data.columns?.join(", ") || "none");
-      setPreviewData(data.rows || []);
-      setRowCount(data.rowCount || 0);
-      setColumnCount(data.columnCount || 0);
-      if (data.columns) {
-        setPreviewColumns(data.columns);
+      
+      // Cache the result if we're executing a specific step (from step click)
+      const executingStepId = executingStepIdRef.current;
+      if (executingStepId) {
+        console.log(`[App] Caching result for step: ${executingStepId}`);
+        stepCacheRef.current.set(executingStepId, {
+          rows: data.rows || [],
+          columns: data.columns || [],
+          rowCount: data.rowCount || 0,
+          columnCount: data.columnCount || 0,
+        });
+        executingStepIdRef.current = undefined; // Clear after caching
+      } else {
+        // Full execution (not step-specific, e.g., from chat) - cache ALL steps up to the latest
+        const extractedSteps = extractSteps(mCode);
+        if (extractedSteps.length > 0) {
+          // Cache the latest step (the one that was just executed)
+          const latestStep = extractedSteps[extractedSteps.length - 1];
+          console.log(`[App] Caching result for latest step: ${latestStep.name}`);
+          stepCacheRef.current.set(latestStep.id, {
+            rows: data.rows || [],
+            columns: data.columns || [],
+            rowCount: data.rowCount || 0,
+            columnCount: data.columnCount || 0,
+          });
+          
+          // Also cache any new steps that were added (if this is a new step execution)
+          // This ensures all new steps get cached when they're added via chat/AI
+          const previousSteps = previousStepsRef.current;
+          if (extractedSteps.length > previousSteps.length) {
+            const newSteps = extractedSteps.slice(previousSteps.length);
+            // Cache all new steps with the same data (they all result in the same final output)
+            for (const newStep of newSteps) {
+              if (newStep.id !== latestStep.id) {
+                console.log(`[App] Caching result for new step: ${newStep.name}`);
+                stepCacheRef.current.set(newStep.id, {
+                  rows: data.rows || [],
+                  columns: data.columns || [],
+                  rowCount: data.rowCount || 0,
+                  columnCount: data.columnCount || 0,
+                });
+              }
+            }
+          }
+        }
       }
-      if (data.engine) {
-        setEngineType(data.engine);
-      }
-      if (data.elapsedMs !== undefined) {
-        setElapsedMs(data.elapsedMs);
-      }
-      setIsStale(false);
-      setHasError(false);
-      setStatusBarError("");
-      setIsExecuting(false);
-      setExecutingMCode(undefined); // Clear executing code when done
-      setIsInitializing(false); // Mark initialization as complete after first successful data load
+      
+      // Batch all state updates together for better performance
+      // React 18+ automatically batches these, but we can also use startTransition for non-urgent updates
+      startTransition(() => {
+        setPreviewData(data.rows || []);
+        setRowCount(data.rowCount || 0);
+        setColumnCount(data.columnCount || 0);
+        if (data.columns) {
+          setPreviewColumns(data.columns);
+        }
+        if (data.engine) {
+          setEngineType(data.engine);
+        }
+        if (data.elapsedMs !== undefined) {
+          setElapsedMs(data.elapsedMs);
+        }
+        setIsStale(false);
+        setHasError(false);
+        setStatusBarError("");
+        setIsExecuting(false);
+        setExecutingMCode(undefined); // Clear executing code when done
+        setIsInitializing(false); // Mark initialization as complete after first successful data load
+      });
       // Don't change code window size after execution - keep user's preferred size
       console.log("[App] ✓ Preview data updated in UI");
     });
@@ -760,11 +1004,11 @@ in
 
   const mainContent = (
     <SplitPane
-      defaultSize={90}
+      defaultSize={10}
       direction="horizontal"
-      storageKey="pq-split-steps-main"
-      minSize={75}
-      maxSize={95}
+      storageKey="pq-split-steps-main-v2"
+      minSize={5}
+      maxSize={15}
     >
       {/* Applied Steps Pane - Left side, ~10% width */}
       <AppliedStepsPane
@@ -875,6 +1119,7 @@ in
           <MCodeEditor
             code={mCode}
             onCodeChange={handleCodeChange}
+            highlightedLines={highlightedStepLines}
           />
         </SplitPane>
       </div>
