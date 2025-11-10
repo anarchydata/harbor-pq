@@ -8,6 +8,7 @@ import { Request, Response } from "express";
 import { parseUserIntent } from "../intentParser";
 import OpenAI from "openai";
 import { executeMCode } from "./mCodeEngine";
+import { writePQToExcel as injectPowerQueryMetadata } from "./excelWriter";
 import { discoverMashupEngine, getCachedEngine, MashupEngineInfo } from "./mashupDiscovery";
 import { MashupRunner, MashupRequest, MashupResponse } from "./mashupRunner";
 import { executeWithDirectCommand, isDirectCommandAvailable } from "./directCommand";
@@ -1016,19 +1017,24 @@ ipcMain.handle(
 
     console.log("[IPC] ✓ Excel table written via openpyxl:", finalPath);
 
-    // Open the file so the user sees it immediately
+    if (!options.mCode || typeof options.mCode !== "string" || !options.mCode.trim()) {
+      throw new Error("No M code provided for Power Query injection");
+    }
+
+    console.log("[IPC] Injecting Power Query metadata...");
+    await injectPowerQueryMetadata(finalPath, options.mCode, rawQueryName);
+    console.log("[IPC] ✓ Power Query metadata injected");
+
     shell.openPath(finalPath).catch((err) => {
       console.error("[IPC] Failed to open Excel file:", err);
     });
-    
-    // Verify file was created
+
     if (!fs.existsSync(finalPath)) {
       throw new Error("File was not created successfully");
     }
-    
+
     console.log("[IPC] ✓ Excel file saved successfully:", finalPath);
-    
-    // Emit success event
+
     mainWindow?.webContents.send("pq:written", {
       path: finalPath,
       success: true,

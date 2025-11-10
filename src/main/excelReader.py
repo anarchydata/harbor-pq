@@ -168,13 +168,28 @@ def read_excel_data(file_path: str, selection: dict):
                 
                 # Convert to #table format for Power Query (more reliable than JSON)
                 # Format: #table({"Column1", "Column2", ...}, {{value1, value2, ...}, ...})
-                from datetime import datetime, date
+                from datetime import datetime, date, time
                 columns_m = "{" + ", ".join([f'"{col}"' for col in columns]) + "}"
                 
                 def format_value(val):
-                    """Format a value for M code - dates as raw strings"""
+                    """Format a value for M code - emit native literals for dates"""
                     if val is None:
                         return "null"
+                    elif isinstance(val, datetime):
+                        if val.time() == time(0, 0, 0, 0):
+                            return f"#date({val.year}, {val.month}, {val.day})"
+                        second = val.second + val.microsecond / 1_000_000
+                        second_str = (
+                            str(int(second))
+                            if abs(second - int(second)) < 1e-9
+                            else f"{second:.6f}".rstrip("0").rstrip(".")
+                        )
+                        return (
+                            f"#datetime({val.year}, {val.month}, {val.day}, "
+                            f"{val.hour}, {val.minute}, {second_str})"
+                        )
+                    elif isinstance(val, date):
+                        return f"#date({val.year}, {val.month}, {val.day})"
                     elif isinstance(val, (int, float)):
                         return str(val)
                     elif isinstance(val, bool):

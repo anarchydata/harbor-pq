@@ -1273,7 +1273,6 @@ in
       const currentTab = tabs.find((tab) => tab.id === currentQueryId);
       const queryName = currentTab?.name || "Query1";
       let columnNames: string[] = [];
-      let rowData: any[][] = [];
 
       if (steps.length > 0) {
         const finalStep = steps[steps.length - 1];
@@ -1282,14 +1281,7 @@ in
           columnNames = cached.columns.map((name) =>
             name == null ? "" : String(name)
           );
-          if (cached.rows && cached.rows.length > 0) {
-            rowData = cached.rows;
-          }
         }
-      }
-
-      if (rowData.length === 0 && previewData.length > 0) {
-        rowData = previewData;
       }
 
       if (columnNames.length === 0 && previewColumns.length > 0) {
@@ -1298,41 +1290,24 @@ in
 
       if (columnNames.length === 0) {
         columnNames = ["Column1"];
-      }
-      // Do not dedupe column names; let Excel keep duplicates if needed
-
-      const columnCount = columnNames.length;
-      const normalizeValue = (val: any) => {
-        if (val instanceof Date) {
-          return val.toISOString().slice(0, 10);
-        }
-        if (typeof val === "string") {
-          const isoMatch = val.match(/^(\d{4}-\d{2}-\d{2})T/);
-          if (isoMatch) {
-            return isoMatch[1];
+      } else {
+        // Ensure unique order-preserving column names to avoid Excel metadata duplication
+        const seen = new Set<string>();
+        columnNames = columnNames.filter((name) => {
+          if (seen.has(name)) {
+            return false;
           }
-          return val;
-        }
-        return val;
-      };
-
-      const normalizedRows =
-        rowData.length > 0
-          ? rowData.map((row = []) => {
-              const normalizedRow: any[] = [];
-              for (let i = 0; i < columnCount; i += 1) {
-                normalizedRow.push(normalizeValue(row[i]));
-              }
-              return normalizedRow;
-            })
-          : [];
+          seen.add(name);
+          return true;
+        });
+      }
 
       // Write PQ to Excel
       const result = await window.electronAPI.writePQToExcel({
         mCode,
         queryName,
         columnNames,
-        rows: normalizedRows,
+        rows: previewData,
       });
 
       if (!result.success) {
