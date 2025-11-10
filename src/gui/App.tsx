@@ -199,6 +199,76 @@ in
   
   // Cache for step results: stepId -> { rows, columns, rowCount, columnCount }
   const stepCacheRef = useRef<Map<string, { rows: any[][]; columns: string[]; rowCount: number; columnCount: number; m_table?: string }>>(new Map());
+
+  const findCachedMTable = useCallback((): string | null => {
+    for (const [, cached] of stepCacheRef.current.entries()) {
+      if (cached.m_table) {
+        return cached.m_table;
+      }
+    }
+    return null;
+  }, [stepCacheRef]);
+
+  const replaceExcelSourceWithCachedTable = useCallback(
+    (code: string, context: string): { code: string; replaced: boolean; neededReplacement: boolean } => {
+      const needsReplacement = /Source\s*=\s*Excel\.(CurrentWorkbook|Workbook\(\s*File\.Contents)/.test(code);
+      if (!needsReplacement) {
+        return { code, replaced: false, neededReplacement: false };
+      }
+
+      const cachedTable = findCachedMTable();
+      if (!cachedTable) {
+        console.warn(`[App] ${context}: Excel source found but no cached m_table available`);
+        return { code, replaced: false, neededReplacement: true };
+      }
+
+      let updatedCode = code;
+      let replaced = false;
+
+      const replaceWithCached = (pattern: RegExp, label: string) => {
+        let localReplaced = false;
+        updatedCode = updatedCode.replace(
+          pattern,
+          (_match: string, prefix: string, suffix?: string) => {
+            localReplaced = true;
+            replaced = true;
+            console.log(`[App] ${context}: Replacing ${label} Source with cached #table`);
+            const trailing = suffix ?? "";
+            return `${prefix}${cachedTable}${trailing}`;
+          }
+        );
+        if (localReplaced) {
+          console.log(`[App] ${context}: ${label} Source replaced successfully`);
+        }
+      };
+
+      replaceWithCached(
+        /(^\s*Source\s*=\s*)Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[(?:Content|Data)\](\s*,?)/gm,
+        "Excel.CurrentWorkbook"
+      );
+
+      replaceWithCached(
+        /(^\s*Source\s*=\s*)Excel\.Workbook\(\s*File\.Contents\([^)]*\)[\s\S]*?\)\{[^}]+\}\[(?:Content|Data)\](\s*,?)/gm,
+        "Excel.Workbook(File.Contents) direct"
+      );
+
+      replaceWithCached(
+        /(^\s*Source\s*=\s*)Excel\.Workbook\(\s*File\.Contents\([^)]*\)[\s\S]*?\)(\s*,?)/gm,
+        "Excel.Workbook(File.Contents)"
+      );
+
+      if (replaced) {
+        const accessPattern = /Source\{\[[^\]]+\]\}\[(?:Data|Content)\]/g;
+        if (accessPattern.test(updatedCode)) {
+          updatedCode = updatedCode.replace(accessPattern, "Source");
+          console.log(`[App] ${context}: Normalized Source{...}[Data/Content] references to Source`);
+        }
+      }
+
+      return { code: updatedCode, replaced, neededReplacement: true };
+    },
+    [findCachedMTable]
+  );
   
   // Track which step is currently being executed (for caching)
   const executingStepIdRef = useRef<string | undefined>(undefined);
@@ -488,31 +558,11 @@ in
     console.log(`[App] Running code up to step: ${step.name}`);
     console.log(`[App] Reconstructed code (before Source replacement):\n${reconstructedCode.substring(0, 200)}`);
     
-    // ALWAYS replace Source with #table if it contains Excel.CurrentWorkbook
-    // This applies to ALL step clicks, including Source step
-    const sourceStepMatch = reconstructedCode.match(/Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/);
-    if (sourceStepMatch) {
-      // Find Source step in cache
-      let cachedTable: { m_table?: string } | null = null;
-      for (const [stepId, cached] of stepCacheRef.current.entries()) {
-        if (cached.m_table) {
-          cachedTable = cached;
-          console.log("[App] Found cached m_table in step:", stepId);
-          break;
-        }
-      }
-      
-      if (cachedTable && cachedTable.m_table) {
-        console.log("[App] Replacing Excel.CurrentWorkbook Source with cached #table in step click");
-        reconstructedCode = reconstructedCode.replace(
-          /Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/,
-          `Source = ${cachedTable.m_table}`
-        );
-        console.log("[App] Reconstructed code (after Source replacement):\n", reconstructedCode.substring(0, 200));
-      } else {
-        console.warn("[App] Excel.CurrentWorkbook found in step click but no cached m_table available");
-      }
+    const replacementResult = replaceExcelSourceWithCachedTable(reconstructedCode, "Step click");
+    if (replacementResult.neededReplacement && !replacementResult.replaced) {
+      console.warn("[App] Step click: Excel source found but no cached m_table available");
     }
+    reconstructedCode = replacementResult.code;
     
     // Track which step we're executing (for caching)
     executingStepIdRef.current = step.id;
@@ -546,7 +596,7 @@ in
         setErrorMessage(errorMsg);
       }
     }
-  }, [mCode, reconstructCodeUpToStep, getStepLines]);
+  }, [mCode, reconstructCodeUpToStep, getStepLines, replaceExcelSourceWithCachedTable]);
 
   // Setup IPC listeners and initialize M code
   useEffect(() => {
@@ -997,32 +1047,14 @@ in
     
     // STEP 2: For execution, check if we need to replace Source with #table
     let codeToExecute: string = code;
-    
-    // STEP 2: Check if we need to replace Source with #table for execution
-    // (Code box already shows the chat code above)
-    const sourceStepMatch = code.match(/Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/);
-    if (sourceStepMatch) {
-      // Find Source step in cache (could be any step ID that represents Source)
-      let cachedTable: { m_table?: string } | null = null;
-      for (const [stepId, cached] of stepCacheRef.current.entries()) {
-        if (cached.m_table) {
-          cachedTable = cached;
-          sendLog("log", `[App] Found cached m_table in step: ${stepId}`);
-          break;
-        }
-      }
-      
-      if (cachedTable && cachedTable.m_table) {
-        sendLog("log", "[App] Replacing Excel.CurrentWorkbook with #table for EXECUTION only");
-        // Replace the entire Source line with #table version FOR EXECUTION
-        // (Code box already shows the chat code with Excel.CurrentWorkbook)
-        codeToExecute = code.replace(
-          /Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/,
-          `Source = ${cachedTable.m_table}`
-        );
+    const replacementResult = replaceExcelSourceWithCachedTable(codeToExecute, "handleCodeChange");
+    codeToExecute = replacementResult.code;
+    if (replacementResult.neededReplacement) {
+      if (replacementResult.replaced) {
+        sendLog("log", "[App] Replaced Excel source with #table for EXECUTION only");
         sendLog("log", `[App] Execution code (with #table): ${codeToExecute.substring(0, 200)}...`);
       } else {
-        sendLog("warn", "[App] Excel.CurrentWorkbook found but no cached m_table available");
+        sendLog("warn", "[App] Excel source found but no cached m_table available");
       }
     }
     
@@ -1064,7 +1096,7 @@ in
       console.warn("[App] electronAPI not available, marking as stale");
       setIsStale(true);
     }
-  }, [currentQueryId, extractSteps]);
+  }, [currentQueryId, extractSteps, replaceExcelSourceWithCachedTable]);
 
   // Handle Import from Excel
   const handleImportExcel = useCallback(async () => {
@@ -1145,37 +1177,42 @@ in
       // Determine if this is sample_powerquery_data.xlsx (needs Changed Type step)
       const isSampleFile = selectedExcelPath.toLowerCase().includes("sample_powerquery_data.xlsx");
       
-      // Display version - shows Excel.CurrentWorkbook() format
-      let displaySource: string;
-      if (selection.kind === "Table") {
-        displaySource = `Excel.CurrentWorkbook(){[Name="${selection.item}"]}[Content]`;
-      } else {
-        displaySource = `Excel.CurrentWorkbook(){[Name="${selection.name}"]}[Content]`;
-      }
-      
+      const sanitizeIdentifier = (value: string): string =>
+        value.replace(/[^A-Za-z0-9_]/g, "_");
+
+      const workbookSource = `Excel.Workbook(File.Contents("${normalizedPath}"), null, true)`;
       let displayMCode: string;
       let executionMCode: string;
-      
+
       if (isSampleFile) {
-        // For sample file, include Changed Type step
+        const accessExpression = `Source{[Item="${selection.item}",Kind="Table"]}[Data]`;
         displayMCode = `let
-    Source = ${displaySource},
-    #"Changed Type" = Table.TransformColumnTypes(Source,{{"Date", type datetime}, {"Customer", type text}, {"Region", type text}, {"SalesAmount", Int64.Type}})
+    Source = ${workbookSource},
+    Table = ${accessExpression},
+    #"Changed Type" = Table.TransformColumnTypes(Table, {{\"Date\", type date}, {\"Customer\", type text}, {\"Region\", type text}, {\"SalesAmount\", Int64.Type}})
 in
     #"Changed Type"`;
-        
+
         executionMCode = `let
     Source = ${dataResult.m_table},
-    #"Changed Type" = Table.TransformColumnTypes(Source,{{"Date", type datetime}, {"Customer", type text}, {"Region", type text}, {"SalesAmount", Int64.Type}})
+    #"Changed Type" = Table.TransformColumnTypes(Source, {{\"Date\", type date}, {\"Customer\", type text}, {\"Region\", type text}, {\"SalesAmount\", Int64.Type}})
 in
     #"Changed Type"`;
       } else {
-        // For other files, just Source
+        const tableItemName = selection.kind === "Table" ? selection.item : selection.name;
+        const baseName = currentTab?.name ?? tabs.find((tab) => tab.id === currentQueryId)?.name ?? "Query1";
+        const tableStepName = selection.kind === "Table" ? "Table" : sanitizeIdentifier(`${baseName}_Table`);
+        const accessExpression =
+          selection.kind === "Table"
+            ? `Source{[Item="${tableItemName}",Kind="Table"]}[Data]`
+            : `Source{[Name="${tableItemName}"]}[Data]`;
+
         displayMCode = `let
-    Source = ${displaySource}
+    Source = ${workbookSource},
+    ${tableStepName} = ${accessExpression}
 in
-    Source`;
-        
+    ${tableStepName}`;
+
         executionMCode = `let
     Source = ${dataResult.m_table}
 in
@@ -1331,30 +1368,12 @@ in
 
   const handleRunAll = useCallback(async () => {
     if (window.electronAPI) {
-      // ALWAYS replace Source with #table if it contains Excel.CurrentWorkbook
+      // ALWAYS replace Source with #table if it contains Excel workbook/file sources
       let codeToExecute = mCode;
-      const sourceStepMatch = mCode.match(/Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/);
-      if (sourceStepMatch) {
-        // Find Source step in cache
-        let cachedTable: { m_table?: string } | null = null;
-        for (const [stepId, cached] of stepCacheRef.current.entries()) {
-          if (cached.m_table) {
-            cachedTable = cached;
-            console.log("[App] Found cached m_table in step:", stepId);
-            break;
-          }
-        }
-        
-        if (cachedTable && cachedTable.m_table) {
-          console.log("[App] Replacing Excel.CurrentWorkbook Source with cached #table in runAll");
-          codeToExecute = mCode.replace(
-            /Source\s*=\s*Excel\.CurrentWorkbook\([^)]*\)\{[^}]+\}\[Content\]/,
-            `Source = ${cachedTable.m_table}`
-          );
-          console.log("[App] Execution code (with #table):", codeToExecute.substring(0, 200));
-        } else {
-          console.warn("[App] Excel.CurrentWorkbook found in runAll but no cached m_table available");
-        }
+      const replacementResult = replaceExcelSourceWithCachedTable(codeToExecute, "runAll");
+      codeToExecute = replacementResult.code;
+      if (replacementResult.neededReplacement && !replacementResult.replaced) {
+        console.warn("[App] runAll: Excel source found but no cached m_table available");
       }
       
       setIsExecuting(true);
@@ -1393,7 +1412,7 @@ in
       setLastRunTime(new Date());
       setStatusBarError("");
     }
-  }, [mCode]);
+  }, [mCode, replaceExcelSourceWithCachedTable]);
 
   const handleCancelExecution = useCallback(async () => {
     if (window.electronAPI) {

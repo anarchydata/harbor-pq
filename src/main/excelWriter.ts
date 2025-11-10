@@ -7,8 +7,6 @@
  * DataMashup payload, custom XML metadata, and all required OOXML links.
  */
 
-import * as fs from "fs";
-import * as path from "path";
 import AdmZip from "adm-zip";
 import crypto from "crypto";
 
@@ -28,8 +26,7 @@ const escapeXmlText = (value: string): string =>
 
 const newGuid = (): string => `{${crypto.randomUUID().toUpperCase()}}`;
 
-const normalizeMCode = (value: string): string =>
-  normalizeLineEndings(value).replace(/\s+$/u, "");
+const normalizeMCode = (value: string): string => value;
 
 const BASELINE_GUIDS = {
   itemPropsId: "{890A2BE1-0607-4E2A-80A1-A6E3DD19B654}",
@@ -148,9 +145,237 @@ const BASELINE_EXT_LST =
 
 const toUtf8Buffer = (value: string): Buffer => Buffer.from(normalizeLineEndings(value), "utf8");
 
-const toUtf16Buffer = (value: string): Buffer => {
-  const normalized = normalizeLineEndings(value);
-  return Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(normalized, "utf16le")]);
+const toUtf16Buffer = (value: string): Buffer =>
+  Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(value, "utf16le")]);
+
+const decodeStepName = (raw: string): string => {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('#"') && trimmed.endsWith('"')) {
+    return trimmed.slice(2, -1).replace(/""/g, '"');
+  }
+  if (trimmed.startsWith("#'") && trimmed.endsWith("'")) {
+    return trimmed.slice(2, -1).replace(/''/g, "'");
+  }
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+};
+
+const encodePathSegment = (value: string): string => encodeURIComponent(value).replace(/%2F/g, "/");
+
+const extractStepNames = (mCode: string): string[] => {
+  const normalized = normalizeLineEndings(mCode);
+  const match = normalized.match(/\blet\b([\s\S]*?)\bin\b/i);
+  if (!match) {
+    return [];
+  }
+
+  const block = match[1];
+  const regex = /(?:^|\r?\n)\s*([^=\r\n]+?)\s*=/g;
+  const steps: string[] = [];
+  let stepMatch: RegExpExecArray | null;
+  while ((stepMatch = regex.exec(block)) !== null) {
+    steps.push(decodeStepName(stepMatch[1]));
+  }
+  return steps;
+};
+
+const extractFinalStepName = (mCode: string): string | undefined => {
+  const normalized = normalizeLineEndings(mCode);
+  const lines = normalized.split("\n");
+  let inSeen = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!inSeen) {
+      if (/^in\b/i.test(line)) {
+        const remainder = line.slice(2).trim();
+        if (remainder.length > 0) {
+          return decodeStepName(remainder);
+        }
+        inSeen = true;
+      }
+      continue;
+    }
+
+    if (!line || line.startsWith("//")) {
+      continue;
+    }
+
+    return decodeStepName(line);
+  }
+
+  return undefined;
+};
+
+const escapeForAttribute = (value: string): string =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+
+const escapeForElement = (value: string): string =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+const encodeColumnListValue = (columnNames: string[]): string => {
+  const encodedNames = columnNames.map((name) => escapeForAttribute(name));
+  const joined = encodedNames.map((name) => `&quot;${name}&quot;`).join(",");
+  return `s[${joined}]`;
+};
+
+const decodeHtmlEntities = (value: string): string =>
+  value
+    .replace(/&quot;/g, `"`)
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+
+type MashupTemplate = {
+  chunk0: Buffer;
+  chunk1: Buffer;
+  chunk2: Buffer;
+  chunk3Prefix: Buffer;
+  chunk3Suffix: Buffer;
+  metadataXmlTemplate: string;
+  chunk4: Buffer;
+};
+
+const TEST_CHUNK_BASE64 = {
+  chunk0: "",
+  chunk1:
+    "UEsDBBQAAgAIAAOOZlv5YQf0owAAAPYAAAASABwAQ29uZmlnL1BhY2thZ2UueG1sIKIYACigFAAAAAAAAAAAAAAAAAAAAAAAAAAAAIWPsQ6CMBRFf4V0py3oQMijDK6SmBCNa1MqNsLD0GL5Nwc/yV8Qo6ib4z33DPferzfIx7YJLrq3psOMRJSTQKPqKoN1RgZ3CBOSC9hIdZK1DiYZbTraKiNH584pY9576he062sWcx6xfbEu1VG3knxk818ODVonUWkiYPcaI2IaLRMa82kTsBlCYfArxFP3bH8grIbGDb0WGsNtCWyOwN4fxANQSwMEFAACAAgAA45mWw/K6aukAAAA6QAAABMAHABbQ29udGVudF9UeXBlc10ueG1sIKIYACigFAAAAAAAAAAAAAAAAAAAAAAAAAAAAG2OSw7CMAxErxJ5n7qwQAg1ZQHcgAtEwf2I5qPGReFsLDgSVyBtd4ilZ+Z55vN6V8dkB/GgMfbeKdgUJQhyxt961yqYuJF7ONbV9Rkoihx1UUHHHA6I0XRkdSx8IJedxo9Wcz7HFoM2d90Sbstyh8Y7JseS5x9QV2dq9DSwuKQsr7UZB3Fac3OVAqbEuMj4l7A/eR3C0BvN2cQkbZR2IXEZXn8BUEsDBBQAAgAIAAOOZltQi+lsJwEAAOQBAAATABwARm9ybXVsYXMvU2VjdGlvbjEubSCiGAAooBQAAAAAAAAAAAAAAAAAAAAAAAAAAAB1kE9rAjEQxe8L+x1CetmFsCCIh4qHsrYgvamlB1ckulPdmmS2+VNXlv3ujUZtaWkuQ+ZN3vtNDGxshYrMQu0N4yiOzI5rKMmcrwX0yIgIsHFE/Jmh0xvwncdmAyJ7Rb1fI+6Tp0pAlqOyoKxJaH5fvBjQpnivcdAvxnhQAnlpCsNlLWBV4wH0hwN9XJXc8qwRpqEpI8oJwYjVDlIWAgPC6lx8bMhvFxMLckSDSNlzpcrLjS67xdhbLi/v72i+42p7WuZYA/UW57Fsrrkyb6hljsJJdRJN8jOMtS31RkA9jxeJ54SOkZbmzliUoK+ChcaehSls/Qf+ac+4APMg0SnrtYmyg352iuu69MY4BYmfnjHAmG/MIFzaya9l2C2zS+OoUv+5Db8AUEsBAi0AFAACAAgAA45mW/lhB/SjAAAA9gAAABIAAAAAAAAAAAAAAAAAAAAAAENvbmZpZy9QYWNrYWdlLnhtbFBLAQItABQAAgAIAAOOZlsPyumrpAAAAOkAAAATAAAAAAAAAAAAAAAAAO8AAABbQ29udGVudF9UeXBlc10ueG1sUEsBAi0AFAACAAgAA45mW1CL6WwnAQAA5AEAABMAAAAAAAAAAAAAAAAA4AEAAEZvcm11bGFzL1NlY3Rpb24xLm1QSwUGAAAAAAMAAwDCAAAAVAMAAAAA",
+  chunk2:
+    "77u/PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz48UGVybWlzc2lvbkxpc3QgeG1sbnM6eHNkPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYSIgeG1sbnM6eHNpPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYS1pbnN0YW5jZSI+PENhbkV2YWx1YXRlRnV0dXJlUGFja2FnZXM+ZmFsc2U8L0NhbkV2YWx1YXRlRnV0dXJlUGFja2FnZXM+PEZpcmV3YWxsRW5hYmxlZD50cnVlPC9GaXJld2FsbEVuYWJsZWQ+PC9QZXJtaXNzaW9uTGlzdD4=",
+  chunk3:
+    "AAAAAHwKAADvu788P3htbCB2ZXJzaW9uPSIxLjAiIGVuY29kaW5nPSJ1dGYtOCI/PjxMb2NhbFBhY2thZ2VNZXRhZGF0YUZpbGUgeG1sbnM6eHNkPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYSIgeG1sbnM6eHNpPSJodHRwOi8vd3d3LnczLm9yZy8yMDAxL1hNTFNjaGVtYS1pbnN0YW5jZSI+PEl0ZW1zPjxJdGVtPjxJdGVtTG9jYXRpb24+PEl0ZW1UeXBlPkFsbEZvcm11bGFzPC9JdGVtVHlwZT48SXRlbVBhdGggLz48L0l0ZW1Mb2NhdGlvbj48U3RhYmxlRW50cmllcz48RW50cnkgVHlwZT0iUmVsYXRpb25zaGlwcyIgVmFsdWU9InNBQUFBQUE9PSIgLz48L1N0YWJsZUVudHJpZXM+PC9JdGVtPjxJdGVtPjxJdGVtTG9jYXRpb24+PEl0ZW1UeXBlPkZvcm11bGE8L0l0ZW1UeXBlPjxJdGVtUGF0aD5TZWN0aW9uMS9UYWJsZTE8L0l0ZW1QYXRoPjwvSXRlbUxvY2F0aW9uPjxTdGFibGVFbnRyaWVzPjxFbnRyeSBUeXBlPSJJc1ByaXZhdGUiIFZhbHVlPSJsMCIgLz48RW50cnkgVHlwZT0iUXVlcnlJRCIgVmFsdWU9InNmNTY3Njk5MS1kN2MzLTQwOGMtYmY2NS01MTA2MjZiNmNiZTEiIC8+PEVudHJ5IFR5cGU9IkZpbGxFbmFibGVkIiBWYWx1ZT0ibDEiIC8+PEVudHJ5IFR5cGU9IkZpbGxPYmplY3RUeXBlIiBWYWx1ZT0ic1RhYmxlIiAvPjxFbnRyeSBUeXBlPSJGaWxsVG9EYXRhTW9kZWxFbmFibGVkIiBWYWx1ZT0ibDAiIC8+PEVudHJ5IFR5cGU9Ik5hbWVVcGRhdGVkQWZ0ZXJGaWxsIiBWYWx1ZT0ibDAiIC8+PEVudHJ5IFR5cGU9IlJlc3VsdFR5cGUiIFZhbHVlPSJzVGFibGUiIC8+PEVudHJ5IFR5cGU9IkJ1ZmZlck5leHRSZWZyZXNoIiBWYWx1ZT0ibDEiIC8+PEVudHJ5IFR5cGU9IkZpbGxUYXJnZXQiIFZhbHVlPSJzVGFibGUxIiAvPjxFbnRyeSBUeXBlPSJGaWxsZWRDb21wbGV0ZVJlc3VsdFRvV29ya3NoZWV0IiBWYWx1ZT0ibDEiIC8+PEVudHJ5IFR5cGU9IkZpbGxDb3VudCIgVmFsdWU9ImwxMDAiIC8+PEVudHJ5IFR5cGU9IkZpbGxFcnJvckNvZGUiIFZhbHVlPSJzVW5rbm93biIgLz48RW50cnkgVHlwZT0iRmlsbEVycm9yQ291bnQiIFZhbHVlPSJsMCIgLz48RW50cnkgVHlwZT0iRmlsbExhc3RVcGRhdGVkIiBWYWx1ZT0iZDIwMjUtMTEtMDZUMjI6NDg6MDUuOTEzNTY5OFoiIC8+PEVudHJ5IFR5cGU9IkZpbGxDb2x1bW5UeXBlcyIgVmFsdWU9InNDUVlEIiAvPjxFbnRyeSBUeXBlPSJGaWxsQ29sdW1uTmFtZXMiIFZhbHVlPSJzWyZxdW90O0RhdGUmcXVvdDssJnF1b3Q7Q3VzdG9tZXImcXVvdDssJnF1b3Q7U2FsZXNBbW91bnQmcXVvdDtdIiAvPjxFbnRyeSBUeXBlPSJGaWxsU3RhdHVzIiBWYWx1ZT0ic0NvbXBsZXRlIiAvPjxFbnRyeSBUeXBlPSJOYXZpZ2F0aW9uU3RlcE5hbWUiIFZhbHVlPSJzTmF2aWdhdGlvbiIgLz48RW50cnkgVHlwZT0iQWRkZWRUb0RhdGFNb2RlbCIgVmFsdWU9ImwwIiAvPjxFbnRyeSBUeXBlPSJSZWxhdGlvbnNoaXBJbmZvQ29udGFpbmVyIiBWYWx1ZT0ic3smcXVvdDtjb2x1bW5Db3VudCZxdW90OzozLCZxdW90O2tleUNvbHVtbk5hbWVzJnF1b3Q7OltdLCZxdW90O3F1ZXJ5UmVsYXRpb25zaGlwcyZxdW90OzpbXSwmcXVvdDtjb2x1bW5JZGVudGl0aWVzJnF1b3Q7OlsmcXVvdDtTZWN0aW9uMS9UYWJsZTEvQXV0b1JlbW92ZWRDb2x1bW5zMS57RGF0ZSwwfSZxdW90OywmcXVvdDtTZWN0aW9uMS9UYWJsZTEvQXV0b1JlbW92ZWRDb2x1bW5zMS57Q3VzdG9tZXIsMX0mcXVvdDssJnF1b3Q7U2VjdGlvbjEvVGFibGUxL0F1dG9SZW1vdmVkQ29sdW1uczEue1NhbGVzQW1vdW50LDJ9JnF1b3Q7XSwmcXVvdDtDb2x1bW5Db3VudCZxdW90OzozLCZxdW90O0tleUNvbHVtbk5hbWVzJnF1b3Q7OltdLCZxdW90O0NvbHVtbklkZW50aXRpZXMmcXVvdDs6WyZxdW90O1NlY3Rpb24xL1RhYmxlMS9BdXRvUmVtb3ZlZENvbHVtbnMxLntEYXRlLDB9JnF1b3Q7LCZxdW90O1NlY3Rpb24xL1RhYmxlMS9BdXRvUmVtb3ZlZENvbHVtbnMxLntDdXN0b21lciwxfSZxdW90OywmcXVvdDtTZWN0aW9uMS9UYWJsZTEvQXV0b1JlbW92ZWRDb2x1bW5zMS57U2FsZXNBbW91bnQsMn0mcXVvdDtdLCZxdW90O1JlbGF0aW9uc2hpcEluZm8mcXVvdDs6W119Ii AvPjwvU3RhYmxlRW50cmllcz48L0l0ZW0+PEl0ZW0+PEl0ZW1Mb2NhdGlvbj48SXRlbVR5cGU+Rm9ybXVsYTwvSXRlbVR5cGU+PEl0ZW1QYXRoPlNlY3Rpb24xL1RhYmxlMS9Tb3VyY2U8L0l0ZW1QYXRoPjwvSXRlbUxvY2F0aW9uPjxTdGFibGVFbnRyaWVzIC8+PC9JdGVtPjxJdGVtPjxJdGVtTG9jYXRpb24+PEl0ZW1UeXBlPkZvcm11bGE8L0l0ZW1UeXBlPjxJdGVtUGF0aD5TZWN0aW9uMS9UYWJsZTEvVGFibGUxX1RhYmxlPC9JdGVtUGF0aD48L0l0ZW1Mb2NhdGlvbj48U3RhYmxlRW50cmllcy AvPjwvSXRlbT48SXRlbT48SXRlbUxvY2F0aW9uPjxJdGVtVHlwZT5Gb3JtdWxhPC9JdGVtVHlwZT48SXRlbVBhdGg+U2VjdGlvbjEvVGFibGUxL0NoYW5nZWQlMjBUeXBlPC9JdGVtUGF0aD48L0l0ZW1Mb2NhdGlvbj48U3RhYmxlRW50cmllcy AvPjwvSXRlbT48SXRlbT48SXRlbUxvY2F0aW9uPjxJdGVtVHlwZT5Gb3JtdWxhPC9JdGVtVHlwZT48SXRlbVBhdGg+U2VjdGlvbjEvVGFibGUxL1JlbW92ZWQlMjBDb2x1bW5zPC9JdGVtUGF0aD48L0l0ZW1Mb2NhdGlvbj48U3RhYmxlRW50cmllcy AvPjwvSXRlbT48L0l0ZW1zPjwvTG9jYWxQYWNrYWdlTWV0YWRhdGFGaWxlPhYAAABQSwUGAAAAAAAAAAAAAAAAAAAAAAAA",
+  chunk4:
+    "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAy0v697gIqkq4HtWamPDaPAAAAAACAAAAAAAQZgAAAAEAACAAAACpPR0SpsoywCi8+psLhPrzH3dJoxYhviHNCmPiBOSLkwAAAAAOgAAAAAIAACAAAABn3vWb2tvMdRD1cLGlvpzakMLD+/DqpD6fAB42W82+uVAAAACm9OH0xBvjwcipZz2GXRTY+gc80mWkQ+TK3kto9A2ocObTxk9AbIap7hhYfRiBT1ni5FE7jak9dytqwAXQiVDvy6WcEIhahTRUJgXjTKEimEAAAABT4A9h/SlfJWXkPgguVSCiNOT743hoG5nQNLClGfqYiC6+N5fUIWSxuxQEv07oXJd2Cj2g99pwlr4FgJJgWVUc",
+};
+
+let cachedMashupTemplate: MashupTemplate | null = null;
+
+const getTestMashupTemplate = (): MashupTemplate => {
+  if (cachedMashupTemplate) {
+    return cachedMashupTemplate;
+  }
+
+  const chunk0 =
+    TEST_CHUNK_BASE64.chunk0.length > 0 ? Buffer.from(TEST_CHUNK_BASE64.chunk0, "base64") : Buffer.alloc(0);
+  const chunk1 = Buffer.from(TEST_CHUNK_BASE64.chunk1, "base64");
+  const chunk2 = Buffer.from(TEST_CHUNK_BASE64.chunk2, "base64");
+  const chunk3 = Buffer.from(TEST_CHUNK_BASE64.chunk3, "base64");
+  const chunk4 = Buffer.from(TEST_CHUNK_BASE64.chunk4, "base64");
+
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  let xmlStart = chunk3.indexOf(bom);
+  if (xmlStart === -1) {
+    xmlStart = chunk3.indexOf(0x3c);
+  }
+  if (xmlStart === -1) {
+    throw new Error("Unable to locate metadata XML start in template chunk");
+  }
+
+  const closingTag = Buffer.from("</LocalPackageMetadataFile>");
+  const closingIndex = chunk3.indexOf(closingTag, xmlStart);
+  if (closingIndex === -1) {
+    throw new Error("Unable to locate metadata XML end in template chunk");
+  }
+  const xmlEnd = closingIndex + closingTag.length;
+
+  const metadataXmlTemplate = chunk3.slice(xmlStart, xmlEnd).toString("utf8");
+  const chunk3Prefix = chunk3.slice(0, xmlStart);
+  const chunk3Suffix = chunk3.slice(xmlEnd);
+
+  cachedMashupTemplate = {
+    chunk0,
+    chunk1,
+    chunk2,
+    chunk3Prefix,
+    chunk3Suffix,
+    metadataXmlTemplate,
+    chunk4,
+  };
+
+  return cachedMashupTemplate;
+};
+
+const CHUNK1_ENTRY_ORDER = ["Config/Package.xml", "[Content_Types].xml", "Formulas/Section1.m"];
+
+const customizeMetadataXml = (
+  templateXml: string,
+  queryName: string,
+  columnNames: string[],
+  mCode: string,
+  fillCount: number
+): string => {
+  const stepNames = extractStepNames(mCode);
+  const finalStep = extractFinalStepName(mCode) || stepNames[stepNames.length - 1] || queryName;
+  const querySegment = encodePathSegment(queryName);
+  const encodedFinalStep = encodePathSegment(finalStep);
+  const rowCount = Math.max(0, fillCount);
+
+  let xml = templateXml;
+
+  xml = xml.replace(/Section1\/Table1/g, `Section1/${querySegment}`);
+  xml = xml.replace(/FillTarget" Value="s[^"]+"/, `FillTarget" Value="s${escapeForAttribute(queryName)}"`);
+  xml = xml.replace(
+    /NavigationStepName" Value="s[^"]+"/,
+    `NavigationStepName" Value="s${escapeForAttribute(finalStep)}"`
+  );
+  xml = xml.replace(/FillCount" Value="l\d+"/, `FillCount" Value="l${rowCount}"`);
+  xml = xml.replace(/FillColumnTypes" Value="s[^"]+"/, `FillColumnTypes" Value="sCQYD"`);
+  xml = xml.replace(/AutoRemovedColumns1/g, encodedFinalStep);
+
+  const columnListValue = encodeColumnListValue(columnNames);
+  xml = xml.replace(/FillColumnNames" Value="s\[.*?\]"/, `FillColumnNames" Value="${columnListValue}"`);
+
+  const relationshipMatch = xml.match(/RelationshipInfoContainer" Value="s([^"]+)"/);
+  if (relationshipMatch) {
+    const decoded = decodeHtmlEntities(relationshipMatch[1]);
+    try {
+      const relationship = JSON.parse(decoded);
+      const identities = columnNames.map(
+        (name, index) => `Section1/${querySegment}/${encodedFinalStep}.{${name},${index}}`
+      );
+
+      relationship.columnCount = columnNames.length;
+      relationship.ColumnCount = columnNames.length;
+      relationship.columnIdentities = identities;
+      relationship.ColumnIdentities = identities;
+
+      const encodedRelationship = escapeForAttribute(JSON.stringify(relationship));
+      xml = xml.replace(
+        /RelationshipInfoContainer" Value="s[^"]+"/,
+        `RelationshipInfoContainer" Value="s${encodedRelationship}"`
+      );
+    } catch (error) {
+      xml = xml.replace(
+        /Section1\/[^/]+\/AutoRemovedColumns1/g,
+        `Section1/${querySegment}/${encodedFinalStep}`
+      );
+    }
+  }
+
+  const stepPathRegex = new RegExp(`<ItemPath>Section1/${querySegment}/([^<]+)</ItemPath>`, "g");
+  let stepIndex = 0;
+  xml = xml.replace(stepPathRegex, (match: string, _existing: string) => {
+    const stepName = stepNames[stepIndex];
+    if (!stepName) {
+      return match;
+    }
+    stepIndex += 1;
+    const encodedStep = encodePathSegment(stepName);
+    return `<ItemPath>Section1/${querySegment}/${encodedStep}</ItemPath>`;
+  });
+
+  return xml;
 };
 
 const parseCellReference = (cellRef: string): { column: string; row: number } => {
@@ -182,92 +407,72 @@ const quoteSheetName = (name: string): string => {
   return `'${escaped}'`;
 };
 
-const adjustSourceTableReference = (mCode: string, tableName: string): string => {
-  const escaped = tableName.replace(/"/g, '""');
-  return mCode.replace(
-    /Excel\.CurrentWorkbook\(\)\{\s*\[Name\s*=\s*"([^"]*)"\s*\]\s*\}\[Content\]/g,
-    `Excel.CurrentWorkbook(){[Name="${escaped}"]}[Content]`
-  );
-};
-
-function createDataMashupStream(mCode: string, queryName: string = "Query1"): Buffer {
-  const tempDir = fs.mkdtempSync(path.join(require("os").tmpdir(), "pq-excel-"));
-  const packageDir = path.join(tempDir, "PackageParts");
-  const configDir = path.join(packageDir, "Config");
-  const formulasDir = path.join(packageDir, "Formulas");
-
-  fs.mkdirSync(configDir, { recursive: true });
-  fs.mkdirSync(formulasDir, { recursive: true });
-
-  try {
-    const packageXml = normalizeLineEndings(`<?xml version="1.0" encoding="utf-8"?>\n<Package xmlns="http://schemas.microsoft.com/DataMashup">\n  <ClientVersion>2.0</ClientVersion>\n  <MinServerVersion>1.0</MinServerVersion>\n  <Culture>en-US</Culture>\n</Package>`);
-    fs.writeFileSync(path.join(configDir, "Package.xml"), packageXml, "utf-8");
+function createDataMashupStream(
+  mCode: string,
+  queryName: string = "Query1",
+  columnNames: string[] = [],
+  fillCount: number = 0
+): Buffer {
+  const template = getTestMashupTemplate();
 
     const formattedQueryName = queryName.includes(" ") ? `#"${queryName}"` : queryName;
-    const normalizedM = normalizeMCode(mCode);
-    const mCodeWithTerminator = normalizedM.endsWith(";") ? normalizedM : `${normalizedM};`;
-    const sectionM = `section Section1;\r\n\r\nshared ${formattedQueryName} = ${mCodeWithTerminator}`;
-    fs.writeFileSync(path.join(formulasDir, "Section1.m"), sectionM, "utf-8");
+  const normalizedM = normalizeMCode(mCode);
 
-    const packageZip = new AdmZip();
-    packageZip.addLocalFolder(packageDir, "PackageParts");
-    const packageZipBuffer = packageZip.toBuffer();
-
-    const metadataQueryPath = queryName.includes(" ")
-      ? `Section1/#"${queryName.replace(/"/g, '""')}"`
-      : `Section1/${queryName}`;
-
-    const metadataXml = normalizeLineEndings(`<?xml version="1.0" encoding="utf-8"?>\n<AllFormulas xmlns="http://schemas.microsoft.com/DataMashup">\n  <Formulas>\n    <Formula Name="${metadataQueryPath}">\n      <FormulaExpression>${metadataQueryPath}</FormulaExpression>\n    </Formula>\n  </Formulas>\n</AllFormulas>`);
-
-    const permissionsXml = normalizeLineEndings(`<?xml version="1.0" encoding="utf-8"?>\n<Permissions xmlns="http://schemas.microsoft.com/DataMashup">\n  <CanEvaluateFuturePackages>false</CanEvaluateFuturePackages>\n  <FirewallEnabled>false</FirewallEnabled>\n  <WorkbookGroupType xsi:nil="true" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" />\n</Permissions>`);
-
-    const metadataBuffer = Buffer.from(metadataXml, "utf-8");
-    const permissionsBuffer = Buffer.from(permissionsXml, "utf-8");
-    const permissionBindings = Buffer.alloc(0);
-    const metadataContentBuffer = new AdmZip().toBuffer();
-
-    const totalSize =
-      4 + packageZipBuffer.length +
-      4 + metadataBuffer.length +
-      4 + permissionsBuffer.length +
-      4 + permissionBindings.length +
-      4 + metadataContentBuffer.length;
-
-    const combinedBuffer = Buffer.alloc(totalSize);
-    let offset = 0;
-
-    combinedBuffer.writeUInt32LE(packageZipBuffer.length, offset);
-    offset += 4;
-    packageZipBuffer.copy(combinedBuffer, offset);
-    offset += packageZipBuffer.length;
-
-    combinedBuffer.writeUInt32LE(metadataBuffer.length, offset);
-    offset += 4;
-    metadataBuffer.copy(combinedBuffer, offset);
-    offset += metadataBuffer.length;
-
-    combinedBuffer.writeUInt32LE(permissionsBuffer.length, offset);
-    offset += 4;
-    permissionsBuffer.copy(combinedBuffer, offset);
-    offset += permissionsBuffer.length;
-
-    combinedBuffer.writeUInt32LE(permissionBindings.length, offset);
-    offset += 4;
-    permissionBindings.copy(combinedBuffer, offset);
-    offset += permissionBindings.length;
-
-    combinedBuffer.writeUInt32LE(metadataContentBuffer.length, offset);
-    offset += 4;
-    metadataContentBuffer.copy(combinedBuffer, offset);
-
-    return combinedBuffer;
-  } finally {
-    try {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    } catch (err) {
-      console.error("[ExcelWriter] Error cleaning up temp directory:", err);
-    }
+  let sectionM: string;
+  const trimmed = normalizedM.trim();
+  if (/^section\s+/i.test(trimmed)) {
+    sectionM = normalizedM;
+  } else {
+    const needsTerminator = /;\s*$/.test(trimmed) ? normalizedM : `${normalizedM};`;
+    sectionM = `section Section1;\r\n\r\nshared ${formattedQueryName} = ${needsTerminator}`;
   }
+
+  const sectionBuffer = toUtf16Buffer(sectionM);
+
+  const chunk1Zip = new AdmZip(Buffer.from(template.chunk1));
+  chunk1Zip.updateFile("Formulas/Section1.m", sectionBuffer);
+
+  const reorderedChunk1Zip = new AdmZip();
+  for (const entryName of CHUNK1_ENTRY_ORDER) {
+    const entry = chunk1Zip.getEntry(entryName);
+    if (!entry) {
+      continue;
+    }
+    const data = entry.getData();
+    reorderedChunk1Zip.addFile(entry.entryName, data, entry.comment, entry.attr);
+  }
+  const remainingEntries = chunk1Zip
+    .getEntries()
+    .filter((entry) => !CHUNK1_ENTRY_ORDER.includes(entry.entryName));
+  for (const entry of remainingEntries) {
+    const data = entry.getData();
+    reorderedChunk1Zip.addFile(entry.entryName, data, entry.comment, entry.attr);
+  }
+
+  const chunk1Buffer = reorderedChunk1Zip.toBuffer();
+
+  const metadataXml = customizeMetadataXml(template.metadataXmlTemplate, queryName, columnNames, normalizedM, fillCount);
+  const chunk3Buffer = Buffer.concat([
+    template.chunk3Prefix,
+    Buffer.from(metadataXml, "utf8"),
+    template.chunk3Suffix,
+  ]);
+
+  const chunkBuffers = [
+    Buffer.from(template.chunk0),
+    chunk1Buffer,
+    Buffer.from(template.chunk2),
+    chunk3Buffer,
+    Buffer.from(template.chunk4),
+  ];
+
+  const withLengths = chunkBuffers.map((chunk) => {
+    const lengthBuffer = Buffer.alloc(4);
+    lengthBuffer.writeUInt32LE(chunk.length, 0);
+    return Buffer.concat([lengthBuffer, chunk]);
+  });
+
+  return Buffer.concat(withLengths);
 }
 
 const createCustomXmlBuffer = (base64Mashup: string, mashupGuid: string): Buffer => {
@@ -381,11 +586,11 @@ export async function writePQToExcel(
   writeUtf8Entry(zip, "xl/styles.xml", BASELINE_STYLES_XML);
 
   const { start, end } = splitTableReference(tableRef.toUpperCase());
+  const dataRowCount = Math.max(0, end.row - start.row);
   const definedNameRange = `${quoteSheetName(sheetName)}!${formatAbsoluteCell(start)}:${formatAbsoluteCell(end)}`;
 
   const sanitizedQueryName = queryName.trim() || tableName;
-  const adjustedMCode = adjustSourceTableReference(mCode, tableName);
-  const dataMashupBuffer = createDataMashupStream(adjustedMCode, sanitizedQueryName);
+  const dataMashupBuffer = createDataMashupStream(mCode, sanitizedQueryName, columnNames, dataRowCount);
   const dataMashupBase64 = dataMashupBuffer.toString("base64");
 
   const mashupGuid = BASELINE_GUIDS.mashupSqmId.toLowerCase();

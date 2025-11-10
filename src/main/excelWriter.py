@@ -6,6 +6,7 @@ Excel workbook that mirrors the preview data shown in the app.
 
 import json
 import sys
+from datetime import date, datetime
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
@@ -13,6 +14,7 @@ try:
     import openpyxl
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.table import Table, TableStyleInfo
+    from openpyxl.utils.datetime import to_excel
 except ImportError:
     print("ERROR: openpyxl is not installed. Install with: pip install openpyxl", file=sys.stderr)
     sys.exit(1)
@@ -31,12 +33,39 @@ def _select_columns(columns: Sequence[str]) -> List[Tuple[int, str]]:
     return selected
 
 
+def _convert_cell_value(value: object) -> object:
+    if value is None:
+        return ""
+
+    if isinstance(value, (datetime, date)):
+        return to_excel(value)
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            # Try plain date without separators (e.g. 20250101)
+            if len(text) == 8 and text.isdigit():
+                try:
+                    dt = datetime.strptime(text, "%Y%m%d")
+                except ValueError:
+                    return value
+            else:
+                return value
+        return to_excel(dt)
+
+    return value
+
+
 def _append_rows(ws, column_map: Sequence[Tuple[int, str]], rows: Sequence[Sequence[object]]) -> None:
     for row in rows or []:
         values: List[object] = []
         for source_idx, _ in column_map:
             if source_idx < len(row):
-                values.append(row[source_idx])
+                values.append(_convert_cell_value(row[source_idx]))
             else:
                 values.append("")
         ws.append(values)
