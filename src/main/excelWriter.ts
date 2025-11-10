@@ -45,11 +45,16 @@ shared ${formattedQueryName} = ${mCode};
     const packageZipBuffer = packageZip.toBuffer();
 
     // 4. Create Metadata XML
+    const sanitizedQueryName = queryName.replace(/"/g, '""');
+    const metadataQueryPath = queryName.includes(" ")
+      ? `Section1/#"${sanitizedQueryName}"`
+      : `Section1/${queryName}`;
+
     const metadataXml = `<?xml version="1.0" encoding="utf-8"?>
 <AllFormulas xmlns="http://schemas.microsoft.com/DataMashup">
   <Formulas>
-    <Formula Name="Section1/${queryName}">
-      <FormulaExpression>Section1/${queryName}</FormulaExpression>
+    <Formula Name="${metadataQueryPath}">
+      <FormulaExpression>${metadataQueryPath}</FormulaExpression>
     </Formula>
   </Formulas>
 </AllFormulas>`;

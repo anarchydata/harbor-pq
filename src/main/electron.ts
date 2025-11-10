@@ -2,7 +2,7 @@
  * Electron main process
  */
 
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, shell } from "electron";
 import * as path from "path";
 import { Request, Response } from "express";
 import { parseUserIntent } from "../intentParser";
@@ -10,7 +10,7 @@ import OpenAI from "openai";
 import { executeMCode } from "./mCodeEngine";
 import { discoverMashupEngine, getCachedEngine, MashupEngineInfo } from "./mashupDiscovery";
 import { MashupRunner, MashupRequest, MashupResponse } from "./mashupRunner";
-import { executeWithDirectCommand, isDirectCommandAvailable } from "./directCommandRunner";
+import { executeWithDirectCommand, isDirectCommandAvailable } from "./directCommand";
 
 // Load environment variables
 try {
@@ -929,16 +929,27 @@ ipcMain.handle("read-excel-data", async (event, filePath: string, selection: any
 });
 
 // IPC handler to write Power Query to Excel file
-ipcMain.handle("write-pq-to-excel", async (event, options: { mCode: string; queryName?: string }) => {
+ipcMain.handle(
+  "write-pq-to-excel",
+  async (
+    event,
+    options: { mCode: string; queryName?: string; columnNames?: string[]; rows?: any[][] }
+  ) => {
   try {
     const fs = require("fs");
     const path = require("path");
     const { dialog } = require("electron");
-    const { writePQToExcel } = require("./excelWriter");
+    const { spawn } = require("child_process");
+
+    const rawQueryName = (options.queryName || "Query1").trim();
+    const safeQueryName = rawQueryName
+      ? rawQueryName.replace(/[<>:"/\\|?*]/g, "_")
+      : "Query1";
+    const suggestedFileName = `${safeQueryName}.xlsx`;
 
     // Always show save dialog to save as a new file
     const result = await dialog.showSaveDialog(mainWindow!, {
-      defaultPath: "query.xlsx",
+      defaultPath: suggestedFileName,
       filters: [
         { name: "Excel Files", extensions: ["xlsx"] },
         { name: "All Files", extensions: ["*"] },
@@ -965,87 +976,50 @@ ipcMain.handle("write-pq-to-excel", async (event, options: { mCode: string; quer
       fs.unlinkSync(finalPath);
     }
 
-    // Create a minimal Excel file structure
-    {
-      const AdmZip = require("adm-zip");
-      const zip = new AdmZip();
-      
-      // Create minimal [Content_Types].xml
-      const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
-  <Default Extension="xml" ContentType="application/xml" />
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" />
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml" />
-  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml" />
-  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml" />
-</Types>`;
-      zip.addFile("[Content_Types].xml", Buffer.from(contentTypes, "utf-8"));
+    const pythonCmd = process.platform === "win32" ? "python" : "python3";
+    const projectRoot = path.resolve(__dirname, "..", "..");
+    const writerScript = path.join(projectRoot, "src", "main", "excelWriter.py");
+    const sheetNameForPython = safeQueryName || "Query1";
+    const columnsJson = JSON.stringify(options.columnNames ?? []);
+    const rowsJson = JSON.stringify(options.rows ?? []);
 
-      // Create minimal _rels/.rels
-      const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml" />
-</Relationships>`;
-      zip.addFile("_rels/.rels", Buffer.from(rels, "utf-8"));
+    console.log("[IPC] Generating Excel workbook via Python:", writerScript);
+    await new Promise<void>((resolve, reject) => {
+      const pythonProcess = spawn(pythonCmd, [writerScript, finalPath, sheetNameForPython, columnsJson, rowsJson], {
+        cwd: path.dirname(writerScript),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
 
-      // Create minimal xl/workbook.xml
-      const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets>
-    <sheet name="Sheet1" sheetId="1" r:id="rId1" />
-  </sheets>
-</workbook>`;
-      zip.addFile("xl/workbook.xml", Buffer.from(workbook, "utf-8"));
+      let stderr = "";
 
-      // Create minimal xl/_rels/workbook.xml.rels
-      const workbookRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml" />
-</Relationships>`;
-      zip.addFile("xl/_rels/workbook.xml.rels", Buffer.from(workbookRels, "utf-8"));
+      pythonProcess.stderr.on("data", (data: Buffer) => {
+        const text = data.toString();
+        stderr += text;
+        console.log("[ExcelWriter DEBUG]", text.trim());
+      });
 
-      // Create minimal xl/worksheets/sheet1.xml
-      const sheet1 = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <sheetData />
-</worksheet>`;
-      zip.addFile("xl/worksheets/sheet1.xml", Buffer.from(sheet1, "utf-8"));
+      pythonProcess.on("error", (error: Error) => {
+        reject(new Error(`Failed to launch Python: ${error.message}`));
+      });
 
-      // Create minimal xl/styles.xml
-      const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="1">
-    <font />
-  </fonts>
-  <fills count="1">
-    <fill />
-  </fills>
-  <borders count="1">
-    <border />
-  </borders>
-  <cellStyleXfs count="1">
-    <xf />
-  </cellStyleXfs>
-  <cellXfs count="1">
-    <xf />
-  </cellXfs>
-</styleSheet>`;
-      zip.addFile("xl/styles.xml", Buffer.from(styles, "utf-8"));
+      pythonProcess.on("close", (code: number) => {
+        if (stderr) {
+          console.log("[ExcelWriter] Python stderr:", stderr.trim());
+        }
+        if (code !== 0) {
+          reject(new Error(stderr || `Python exited with code ${code}`));
+        } else {
+          resolve();
+        }
+      });
+    });
 
-      // Create minimal xl/sharedStrings.xml
-      const sharedStrings = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="0" uniqueCount="0" />`;
-      zip.addFile("xl/sharedStrings.xml", Buffer.from(sharedStrings, "utf-8"));
+    console.log("[IPC] ✓ Excel table written via openpyxl:", finalPath);
 
-      zip.writeZip(finalPath);
-    }
-
-    console.log("[IPC] Writing PQ to Excel:", finalPath);
-    console.log("[IPC] M Code length:", options.mCode.length);
-    
-    // Write Power Query to Excel
-    await writePQToExcel(finalPath, options.mCode, options.queryName || "Query1");
+    // Open the file so the user sees it immediately
+    shell.openPath(finalPath).catch((err) => {
+      console.error("[IPC] Failed to open Excel file:", err);
+    });
     
     // Verify file was created
     if (!fs.existsSync(finalPath)) {

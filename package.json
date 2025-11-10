@@ -28,7 +28,8 @@
     "express": "^4.18.2",
     "openai": "^4.20.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "@ooxml-tools/cli": "github:ooxml-tools/cli#main"
   },
   "devDependencies": {
     "@types/adm-zip": "^0.5.7",

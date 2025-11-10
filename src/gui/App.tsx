@@ -29,7 +29,7 @@ declare global {
       connectExcel: (path: string) => Promise<{ success: boolean; path: string; error?: string }>;
       listExcelSheets: (filePath: string) => Promise<{ success: boolean; sheets?: any[]; tables?: any[]; error?: string }>;
       readExcelData: (filePath: string, selection: any) => Promise<{ success: boolean; m_table?: string; columns?: string[]; rowCount?: number; columnCount?: number; error?: string }>;
-      writePQToExcel: (options: { mCode: string; queryName?: string }) => Promise<{ success: boolean; path?: string; error?: string }>;
+      writePQToExcel: (options: { mCode: string; queryName?: string; columnNames?: string[]; rows?: any[][] }) => Promise<{ success: boolean; path?: string; error?: string }>;
       export: (options: { format: string; path?: string }) => Promise<{ success: boolean; path?: string; error?: string }>;
       runStep: (stepId: string) => Promise<{ success: boolean; data?: any; error?: string }>;
       runAll: (mCode?: string) => Promise<{ success: boolean; data?: any; error?: string }>;
@@ -1270,13 +1270,69 @@ in
     if (!window.electronAPI) return;
 
     try {
-      // Extract query name from M code
-      const queryName = extractQueryName(mCode);
+      const currentTab = tabs.find((tab) => tab.id === currentQueryId);
+      const queryName = currentTab?.name || "Query1";
+      let columnNames: string[] = [];
+      let rowData: any[][] = [];
+
+      if (steps.length > 0) {
+        const finalStep = steps[steps.length - 1];
+        const cached = stepCacheRef.current.get(finalStep.id);
+        if (cached?.columns && cached.columns.length > 0) {
+          columnNames = cached.columns.map((name) =>
+            name == null ? "" : String(name)
+          );
+          if (cached.rows && cached.rows.length > 0) {
+            rowData = cached.rows;
+          }
+        }
+      }
+
+      if (rowData.length === 0 && previewData.length > 0) {
+        rowData = previewData;
+      }
+
+      if (columnNames.length === 0 && previewColumns.length > 0) {
+        columnNames = previewColumns.map((name) => (name == null ? "" : String(name)));
+      }
+
+      if (columnNames.length === 0) {
+        columnNames = ["Column1"];
+      }
+      // Do not dedupe column names; let Excel keep duplicates if needed
+
+      const columnCount = columnNames.length;
+      const normalizeValue = (val: any) => {
+        if (val instanceof Date) {
+          return val.toISOString().slice(0, 10);
+        }
+        if (typeof val === "string") {
+          const isoMatch = val.match(/^(\d{4}-\d{2}-\d{2})T/);
+          if (isoMatch) {
+            return isoMatch[1];
+          }
+          return val;
+        }
+        return val;
+      };
+
+      const normalizedRows =
+        rowData.length > 0
+          ? rowData.map((row = []) => {
+              const normalizedRow: any[] = [];
+              for (let i = 0; i < columnCount; i += 1) {
+                normalizedRow.push(normalizeValue(row[i]));
+              }
+              return normalizedRow;
+            })
+          : [];
 
       // Write PQ to Excel
       const result = await window.electronAPI.writePQToExcel({
         mCode,
         queryName,
+        columnNames,
+        rows: normalizedRows,
       });
 
       if (!result.success) {
@@ -1294,7 +1350,7 @@ in
       setHasError(true);
       setErrorMessage(errorMsg);
     }
-  }, [mCode, extractQueryName]);
+  }, [mCode, currentQueryId, tabs, steps, previewColumns, previewData]);
 
 
 

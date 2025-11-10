@@ -11,7 +11,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   connectExcel: (path: string) => ipcRenderer.invoke("connect-excel", path),
   listExcelSheets: (filePath: string) => ipcRenderer.invoke("list-excel-sheets", filePath),
   readExcelData: (filePath: string, selection: any) => ipcRenderer.invoke("read-excel-data", filePath, selection),
-  writePQToExcel: (options: { filePath: string; mCode: string; queryName?: string }) =>
+  writePQToExcel: (options: { mCode: string; queryName?: string; columnNames?: string[]; rows?: any[][] }) =>
     ipcRenderer.invoke("write-pq-to-excel", options),
   export: (options: { format: string; path?: string }) =>
     ipcRenderer.invoke("export", options),

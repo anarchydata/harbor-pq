@@ -53,3 +53,8 @@ The Power Query SDK has a version dependency chain:
 
 
 
+
+
+
+
+

@@ -1,0 +1,3 @@
+[submodule "external/ooxml-cli"]
+	path = external/ooxml-cli
+	url = https://github.com/ooxml-tools/cli.git

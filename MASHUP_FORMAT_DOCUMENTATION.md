@@ -72,3 +72,8 @@ The MS-QDEFF spec describes the binary format used in Excel/Power BI files, but 
 
 
 
+
+
+
+
+
